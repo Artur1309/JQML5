@@ -1,0 +1,298 @@
+const path = require('node:path');
+
+function generateBundleSource(componentGraph, runtimeFilePath) {
+  const components = componentGraph.components.slice().sort((a, b) => a.filePath.localeCompare(b.filePath));
+  const moduleIdMap = new Map();
+  components.forEach((component, index) => {
+    moduleIdMap.set(component.filePath, `__component_${index}`);
+  });
+
+  const entryId = moduleIdMap.get(componentGraph.entryComponent.filePath);
+  const runtimeImport = normalizeImportPath(runtimeFilePath);
+
+  let output = '';
+  output += `const __runtime = require(${JSON.stringify(runtimeImport)});\n`;
+  output += `${helperRuntimeCode()}\n`;
+
+  for (const component of components) {
+    output += generateComponentFactory(component, moduleIdMap);
+    output += '\n';
+  }
+
+  output += `const __entryComponent = ${entryId}();\n`;
+  output += `window.addEventListener('DOMContentLoaded', () => {\n`;
+  output += `  const canvas = document.getElementById('app') || document.querySelector('canvas');\n`;
+  output += `  const context = new __runtime.Context(null, {});\n`;
+  output += `  const root = __entryComponent.createObject(null, {}, context, new __runtime.ComponentScope());\n`;
+  output += `  if (canvas && root instanceof __runtime.Item) {\n`;
+  output += `    if (root.width === 0) root.width = canvas.width || 800;\n`;
+  output += `    if (root.height === 0) root.height = canvas.height || 600;\n`;
+  output += `    const scene = new __runtime.Scene({ rootItem: root, canvas });\n`;
+  output += `    scene.renderer.render();\n`;
+  output += `    window.__jqmlScene = scene;\n`;
+  output += `  }\n`;
+  output += `  window.__jqmlRoot = root;\n`;
+  output += `});\n`;
+
+  return output;
+}
+
+function generateComponentFactory(component, moduleIdMap) {
+  const moduleId = moduleIdMap.get(component.filePath);
+
+  const typeResolution = [];
+  for (const [typeName, importedPath] of component.localTypes.entries()) {
+    if (moduleIdMap.has(importedPath)) {
+      typeResolution.push(`      ${JSON.stringify(typeName)}: { kind: 'component', create: ${moduleIdMap.get(importedPath)} },`);
+    }
+  }
+
+  for (const typeName of component.moduleTypes.values()) {
+    const kind = typeName === 'Component' ? 'runtime-component' : 'runtime';
+    typeResolution.push(`      ${JSON.stringify(typeName)}: { kind: '${kind}', ctor: __runtime[${JSON.stringify(typeName)}] },`);
+  }
+
+  outputTypeFallbacks(typeResolution);
+
+  let output = '';
+  output += `const ${moduleId} = (() => {\n`;
+  output += `  let __cached = null;\n`;
+  output += `  return () => {\n`;
+  output += `    if (__cached) return __cached;\n`;
+  output += `    const __resolveType = (name) => {\n`;
+  output += `      const map = {\n`;
+  output += typeResolution.join('\n');
+  output += '\n      };\n';
+  output += `      if (Object.prototype.hasOwnProperty.call(map, name)) return map[name];\n`;
+  output += `      if (__runtime[name]) return { kind: name === 'Component' ? 'runtime-component' : 'runtime', ctor: __runtime[name] };\n`;
+  output += `      throw new Error('Unknown QML type: ' + name + ' in ${escapeForTemplate(component.filePath)}');\n`;
+  output += `    };\n`;
+  output += `    const __instantiate = (typeName, options = {}, parent = null) => {\n`;
+  output += `      const resolved = __resolveType(typeName);\n`;
+  output += `      if (resolved.kind === 'component') {\n`;
+  output += `        const child = resolved.create().createObject(parent, {}, options.context, options.componentScope);\n`;
+  output += `        return child;\n`;
+  output += `      }\n`;
+  output += `      if (resolved.kind === 'runtime-component') {\n`;
+  output += `        throw new Error('Component type cannot be directly instantiated. Use Component { ... } form.');\n`;
+  output += `      }\n`;
+  output += `      const ctor = resolved.ctor || __runtime[typeName];\n`;
+  output += `      if (typeof ctor !== 'function') throw new Error('Missing runtime constructor for type: ' + typeName);\n`;
+  output += `      const isItemCtor = ctor === __runtime.Item || ctor.prototype instanceof __runtime.Item;\n`;
+  output += `      const ctorOptions = isItemCtor ? { ...options, parent: null } : options;\n`;
+  output += `      return new ctor(ctorOptions);\n`;
+  output += `    };\n`;
+  output += `    const __createObjectTree = (node, parent, scopeState) => {\n`;
+  output += `      if (node.typeName === 'Component') {\n`;
+  output += `        const templateNode = node.children[0] || null;\n`;
+  output += `        const componentFactory = new __runtime.Component(({ parent: componentParent, context, componentScope }) => {\n`;
+  output += `          if (!templateNode) {\n`;
+  output += `            throw new Error('Component declaration requires a child object in ${escapeForTemplate(component.filePath)}');\n`;
+  output += `          }\n`;
+  output += `          const nestedState = __createScopeState(componentParent, context, componentScope);\n`;
+  output += `          return __createObjectTree(templateNode, componentParent, nestedState);\n`;
+  output += `        });\n`;
+  output += `        if (node.id) { scopeState.ids[node.id] = componentFactory; }\n`;
+  output += `        return componentFactory;\n`;
+  output += `      }\n`;
+  output += `      const options = __createObjectOptions(node, parent, scopeState);\n`;
+  output += `      const object = __instantiate(node.typeName, options, parent);\n`;
+  output += `      if (node.id) { scopeState.ids[node.id] = object; }\n`;
+  output += `      __applyObjectDefinition(object, node, scopeState);\n`;
+  output += `      return object;\n`;
+  output += `    };\n`;
+  output += `    const __createScopeState = (rootParent, context, componentScope) => ({\n`;
+  output += `      context,\n`;
+  output += `      componentScope,\n`;
+  output += `      root: null,\n`;
+  output += `      ids: Object.create(null),\n`;
+  output += `      hostParent: rootParent,\n`;
+  output += `    });\n`;
+  output += `    const __createObjectOptions = (node, parent, scopeState) => ({\n`;
+  output += `      parent: parent instanceof __runtime.QObject ? parent : null,\n`;
+  output += `      parentItem: parent instanceof __runtime.Item ? parent : null,\n`;
+  output += `      context: scopeState.context,\n`;
+  output += `      componentScope: scopeState.componentScope,\n`;
+  output += `      id: node.id || null,\n`;
+  output += `    });\n`;
+  output += `    const __applyObjectDefinition = (object, node, scopeState) => {\n`;
+  output += `      if (!scopeState.root && object instanceof __runtime.QObject) scopeState.root = object;\n`;
+  output += `      for (const definition of node.propertyDefinitions) {\n`;
+  output += `        if (!object._propertyDefinitions.has(definition.name)) {\n`;
+  output += `          __defineOrSet(object, definition.name, __compileValue(object, definition.value, scopeState, definition.name, false), true);\n`;
+  output += `        }\n`;
+  output += `      }\n`;
+  output += `      const anchorBuffer = {};\n`;
+  output += `      for (const prop of node.properties) {\n`;
+  output += `        if (prop.name.startsWith('anchors.')) {\n`;
+  output += `          anchorBuffer[prop.name.slice('anchors.'.length)] = __compileValue(object, prop.value, scopeState, prop.name, false);\n`;
+  output += `          continue;\n`;
+  output += `        }\n`;
+  output += `        __assignPropertyPath(object, prop.name, __compileValue(object, prop.value, scopeState, prop.name, false));\n`;
+  output += `      }\n`;
+  output += `      if (Object.keys(anchorBuffer).length && typeof object.setAnchors === 'function') {\n`;
+  output += `        object.setAnchors(anchorBuffer);\n`;
+  output += `      }\n`;
+  output += `      for (const handler of node.signalHandlers) {\n`;
+  output += `        const signalName = handler.name[2].toLowerCase() + handler.name.slice(3);\n`;
+  output += `        if (typeof object.connect === 'function') {\n`;
+  output += `          object.connect(signalName, (...args) => {\n`;
+  output += `            const handlerScope = __createExecutionScope(object, scopeState, object.parentItem || object.parent, args[0]);\n`;
+  output += `            return __runJs(handler.value, handlerScope, object);\n`;
+  output += `          });\n`;
+  output += `        }\n`;
+  output += `      }\n`;
+  output += `      for (const childNode of node.children) {\n`;
+  output += `        __createObjectTree(childNode, object, scopeState);\n`;
+  output += `      }\n`;
+  output += `    };\n`;
+  output += `    const __compileValue = (object, valueNode, scopeState, propertyName, forBinding) => {\n`;
+  output += `      if (!valueNode) return null;\n`;
+  output += `      if (valueNode.kind === 'StringValue') return valueNode.value;\n`;
+  output += `      if (valueNode.kind === 'NumberValue') return valueNode.value;\n`;
+  output += `      if (valueNode.kind === 'BooleanValue') return valueNode.value;\n`;
+  output += `      if (valueNode.kind === 'NullValue') return null;\n`;
+  output += `      if (valueNode.kind === 'IdentifierValue' && valueNode.name in scopeState.ids) return scopeState.ids[valueNode.name];\n`;
+  output += `      if (valueNode.kind === 'ObjectValue') return __createObjectTree(valueNode.object, object, scopeState);\n`;
+  output += `      if (valueNode.kind === 'JsBlockValue') return valueNode;\n`;
+  output += `      if (valueNode.kind === 'JsExpressionValue' || valueNode.kind === 'IdentifierValue') {\n`;
+  output += `        return new __runtime.Binding(() => {\n`;
+  output += `          const scope = __createExecutionScope(object, scopeState, object.parentItem || object.parent, null);\n`;
+  output += `          return __evaluateExpression(valueNode.raw, scope, object);\n`;
+  output += `        });\n`;
+  output += `      }\n`;
+  output += `      return null;\n`;
+  output += `    };\n`;
+  output += `    const __assignPropertyPath = (object, pathName, value) => {\n`;
+  output += `      const parts = pathName.split('.');\n`;
+  output += `      if (parts.length === 1) {\n`;
+  output += `        __defineOrSet(object, parts[0], value, false);\n`;
+  output += `        return;\n`;
+  output += `      }\n`;
+  output += `      let target = object;\n`;
+  output += `      for (let i = 0; i < parts.length - 1; i += 1) {\n`;
+  output += `        const key = parts[i];\n`;
+  output += `        if (target[key] == null || typeof target[key] !== 'object') {\n`;
+  output += `          target[key] = {};\n`;
+  output += `        }\n`;
+  output += `        target = target[key];\n`;
+  output += `      }\n`;
+  output += `      target[parts[parts.length - 1]] = value;\n`;
+  output += `    };\n`;
+  output += `    const __defineOrSet = (object, name, value, forceDefine) => {\n`;
+  output += `      if (object && object._propertyDefinitions && object._propertyDefinitions.has(name) && !forceDefine) {\n`;
+  output += `        object[name] = value;\n`;
+  output += `        return;\n`;
+  output += `      }\n`;
+  output += `      if (object && object._propertyDefinitions && object._propertyDefinitions.has(name) && forceDefine) {\n`;
+  output += `        object[name] = value;\n`;
+  output += `        return;\n`;
+  output += `      }\n`;
+  output += `      if (object && typeof object.defineProperty === 'function') {\n`;
+  output += `        object.defineProperty(name, value);\n`;
+  output += `      } else {\n`;
+  output += `        object[name] = value;\n`;
+  output += `      }\n`;
+  output += `    };\n`;
+  output += `    const __component = new __runtime.Component(({ parent, properties, context, componentScope }) => {\n`;
+  output += `      const scopeState = __createScopeState(parent, context, componentScope);\n`;
+  output += `      const root = __createObjectTree(${JSON.stringify(component.ast.rootObject)}, parent, scopeState);\n`;
+  output += `      for (const [key, value] of Object.entries(properties || {})) {\n`;
+  output += `        __assignPropertyPath(root, key, value);\n`;
+  output += `      }\n`;
+  output += `      return root;\n`;
+  output += `    });\n`;
+  output += `    __cached = __component;\n`;
+  output += `    return __cached;\n`;
+  output += `  };\n`;
+  output += `})();\n`;
+
+  return output;
+}
+
+function helperRuntimeCode() {
+  return `
+const __exprCache = new Map();
+function __compileExpression(code) {
+  if (!__exprCache.has(code)) {
+    __exprCache.set(code, new Function('__scope', '__self', 'with (__scope) { return (' + code + '); }'));
+  }
+  return __exprCache.get(code);
+}
+function __evaluateExpression(code, scope, self) {
+  const fn = __compileExpression(code);
+  return fn.call(self, scope, self);
+}
+function __runJs(valueNode, scope, self) {
+  if (!valueNode) return undefined;
+  if (valueNode.kind === 'JsBlockValue') {
+    const body = valueNode.raw || '';
+    const fn = new Function('__scope', '__self', 'with (__scope) { ' + body + ' }');
+    return fn.call(self, scope, self);
+  }
+  if (valueNode.raw) {
+    return __evaluateExpression(valueNode.raw, scope, self);
+  }
+  return undefined;
+}
+function __createExecutionScope(self, scopeState, parent, event) {
+  const context = scopeState.context;
+  const ids = scopeState.ids;
+  const root = scopeState.root || self;
+  return new Proxy(Object.create(null), {
+    has: () => true,
+    get(target, prop) {
+      if (prop === Symbol.unscopables) return undefined;
+      if (prop === 'this') return self;
+      if (prop === 'self') return self;
+      if (prop === 'parent') return parent || null;
+      if (prop === 'root') return root || null;
+      if (prop === 'ids') return ids;
+      if (prop === 'event') return event || null;
+      if (prop === 'context') return context || null;
+      if (typeof prop === 'string') {
+        if (Object.prototype.hasOwnProperty.call(ids, prop)) return ids[prop];
+        if (self && prop in self) return self[prop];
+        if (context && typeof context.lookup === 'function') {
+          const lookedUp = context.lookup(prop);
+          if (lookedUp !== undefined) return lookedUp;
+        }
+      }
+      return globalThis[prop];
+    },
+    set(target, prop, value) {
+      if (typeof prop === 'string') {
+        if (self && prop in self) {
+          self[prop] = value;
+          return true;
+        }
+        if (context && typeof context.set === 'function') {
+          context.set(prop, value);
+          return true;
+        }
+      }
+      target[prop] = value;
+      return true;
+    }
+  });
+}
+`;
+}
+
+function normalizeImportPath(filePath) {
+  return path.resolve(filePath).replace(/\\/g, '/');
+}
+
+function outputTypeFallbacks(typeResolution) {
+  if (!typeResolution.length) {
+    typeResolution.push(`      __placeholderForEmptyMap: { kind: 'runtime', ctor: null },`);
+  }
+}
+
+function escapeForTemplate(value) {
+  return String(value).replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+}
+
+module.exports = {
+  generateBundleSource,
+};
