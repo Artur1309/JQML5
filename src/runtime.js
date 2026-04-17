@@ -203,6 +203,7 @@ class Item extends QtObject {
     super({ parent, properties });
 
     this._childItems = [];
+    this._syncingParentLinks = false;
 
     this.defineProperty('x', 0);
     this.defineProperty('y', 0);
@@ -220,9 +221,17 @@ class Item extends QtObject {
         }
         if (nextValue instanceof Item) {
           nextValue._addChildItem(this);
-          QObject.prototype.setParent.call(this, nextValue);
-        } else if (this.parent instanceof Item) {
-          QObject.prototype.setParent.call(this, null);
+        }
+
+        if (this._syncingParentLinks) {
+          return;
+        }
+
+        this._syncingParentLinks = true;
+        try {
+          QObject.prototype.setParent.call(this, nextValue instanceof Item ? nextValue : null);
+        } finally {
+          this._syncingParentLinks = false;
         }
       },
     });
@@ -252,11 +261,16 @@ class Item extends QtObject {
   }
 
   setParent(parent) {
-    super.setParent(parent);
-    if (parent instanceof Item) {
-      this._setPropertyValue('parentItem', parent);
-    } else {
-      this._setPropertyValue('parentItem', null);
+    this._syncingParentLinks = true;
+    try {
+      QObject.prototype.setParent.call(this, parent);
+      if (parent instanceof Item) {
+        this._setPropertyValue('parentItem', parent);
+      } else {
+        this._setPropertyValue('parentItem', null);
+      }
+    } finally {
+      this._syncingParentLinks = false;
     }
     return this;
   }
