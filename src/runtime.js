@@ -191,8 +191,12 @@ class QObject {
       alias: false,
     };
 
+    const initialBinding = Binding.from(initialValue);
     this._propertyDefinitions.set(name, definition);
-    this._propertyValues.set(name, undefined);
+    this._propertyValues.set(
+      name,
+      initialBinding ? undefined : definition.coerce(initialValue),
+    );
     this.defineSignal(`${name}Changed`);
 
     Object.defineProperty(this, name, {
@@ -210,7 +214,9 @@ class QObject {
       },
     });
 
-    this._assignProperty(name, initialValue, { skipUnbind: true });
+    if (initialBinding) {
+      this._bindProperty(name, initialBinding);
+    }
   }
 
   defineAlias(name, targetObject, targetProperty) {
@@ -351,7 +357,7 @@ class QObject {
     this._propertyBindings.delete(name);
   }
 
-  _setPropertyValue(name, rawValue) {
+  _setPropertyValue(name, rawValue, options = {}) {
     const definition = this._propertyDefinitions.get(name);
     if (!definition) {
       throw new Error(`Property '${name}' is not defined.`);
@@ -382,7 +388,7 @@ class QObject {
     if (!this._propertyDefinitions.has(name)) {
       throw new Error(`Property '${name}' is not defined.`);
     }
-    return this[name];
+    return this._propertyValues.get(name);
   }
 
   setProperty(name, value) {
@@ -1350,7 +1356,9 @@ class Scene {
       current = current.parentItem;
     }
 
-    this.renderer.markDirty();
+    if (event.accepted) {
+      this.renderer.markDirty();
+    }
     return event;
   }
 }
@@ -1376,8 +1384,8 @@ if (typeof module !== 'undefined' && module.exports) {
 }
 
 if (typeof globalThis !== 'undefined') {
-  globalThis.JQML5 = {
-    ...(globalThis.JQML5 || {}),
-    ...runtimeExports,
-  };
+  if (!globalThis.JQML5 || typeof globalThis.JQML5 !== 'object') {
+    globalThis.JQML5 = {};
+  }
+  Object.assign(globalThis.JQML5, runtimeExports);
 }

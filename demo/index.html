@@ -64,13 +64,6 @@
 
       const scene = new runtime.Scene({ rootItem: root, canvas });
       scene.renderer.render();
-
-      setInterval(() => {
-        if (loader.item) {
-          loader.item.color = counter.highlight;
-          scene.renderer.render();
-        }
-      }, 250);
     </script>
   </body>
 </html>
