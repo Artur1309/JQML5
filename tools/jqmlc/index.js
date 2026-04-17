@@ -63,7 +63,9 @@ function printHelp() {
     `Options:\n` +
     `  --outdir <dir>         Output directory (default: dist)\n` +
     `  --import-path <path>   Additional local import search path (repeatable)\n` +
-    `  --help, -h             Show help\n`,
+    `  --help, -h             Show help\n\n` +
+    `Security: jqmlc executes generated bindings/handlers as JavaScript at runtime.\n` +
+    `Compile and run only trusted QML sources.\n`,
   );
 }
 

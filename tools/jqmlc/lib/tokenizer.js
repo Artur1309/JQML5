@@ -18,7 +18,11 @@ class Tokenizer {
   }
 
   peek(offset = 0) {
-    return this.source[this.index + offset];
+    const target = this.index + offset;
+    if (target < 0 || target >= this.source.length) {
+      return undefined;
+    }
+    return this.source[target];
   }
 
   location() {
@@ -146,19 +150,20 @@ class Tokenizer {
 
       if (char === '\\') {
         this.advance();
-        if (!this.eof()) {
-          const escaped = this.current();
-          raw += escaped;
-          value += `\\${escaped}`;
-          this.advance();
+        if (this.eof()) {
+          this.error('Unterminated string literal escape.', start);
         }
+        const escaped = this.current();
+        raw += escaped;
+        value += decodeEscape(this, escaped);
+        this.advance();
         continue;
       }
 
       if (char === quote) {
         this.advance();
         return {
-          value: JSON.parse(raw),
+          value,
           raw,
           location: start,
         };
@@ -340,7 +345,11 @@ class Tokenizer {
     while (!this.eof()) {
       const char = this.current();
       if (char === '\\') {
-        this.advance(2);
+        this.advance();
+        if (this.eof()) {
+          break;
+        }
+        this.advance();
         continue;
       }
       this.advance();
@@ -349,6 +358,40 @@ class Tokenizer {
       }
     }
     this.error('Unterminated string literal.');
+  }
+}
+
+function decodeEscape(tokenizer, escaped) {
+  switch (escaped) {
+    case 'n': return '\n';
+    case 'r': return '\r';
+    case 't': return '\t';
+    case 'b': return '\b';
+    case 'f': return '\f';
+    case 'v': return '\v';
+    case '0': return '\0';
+    case '\\': return '\\';
+    case '"': return '"';
+    case '\'': return '\'';
+    case 'x': {
+      const first = tokenizer.peek(1);
+      const second = tokenizer.peek(2);
+      if (!first || !second || !/[A-Fa-f0-9]/.test(first) || !/[A-Fa-f0-9]/.test(second)) {
+        tokenizer.error('Invalid hexadecimal string escape.');
+      }
+      tokenizer.advance(2);
+      return String.fromCharCode(parseInt(`${first}${second}`, 16));
+    }
+    case 'u': {
+      const hex = `${tokenizer.peek(1) || ''}${tokenizer.peek(2) || ''}${tokenizer.peek(3) || ''}${tokenizer.peek(4) || ''}`;
+      if (!/^[A-Fa-f0-9]{4}$/.test(hex)) {
+        tokenizer.error('Invalid unicode string escape.');
+      }
+      tokenizer.advance(4);
+      return String.fromCharCode(parseInt(hex, 16));
+    }
+    default:
+      return escaped;
   }
 }
 

@@ -48,6 +48,8 @@ Output:
 - Signal handlers (`onXxx`) with arbitrary JavaScript (`{ ... }` blocks or expressions)
 - Bindings compiled to runtime `Binding` objects
 
+> ⚠️ Security note: the compiler intentionally supports arbitrary JavaScript in bindings/handlers, so compile and run only trusted QML sources.
+
 ### Extensibility points
 
 Compiler internals are split so you can extend without rewriting the pipeline:

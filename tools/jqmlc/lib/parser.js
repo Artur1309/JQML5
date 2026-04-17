@@ -1,4 +1,5 @@
 const path = require('node:path');
+const fs = require('node:fs');
 const { Tokenizer } = require('./tokenizer');
 const { CompilerError } = require('./errors');
 
@@ -47,10 +48,12 @@ function parseImport(tokenizer) {
   let source;
   let version = null;
   let alias = null;
+  let isLocal = false;
 
   if (tokenizer.current() === '"' || tokenizer.current() === "'") {
     const str = tokenizer.readString();
     source = str.value;
+    isLocal = true;
   } else {
     const moduleName = tokenizer.readIdentifierPath();
     source = moduleName.value;
@@ -91,6 +94,7 @@ function parseImport(tokenizer) {
     source,
     version,
     alias,
+    isLocal: Boolean(isLocal),
     location: start,
   };
 }
@@ -307,7 +311,6 @@ function consumeTerminator(tokenizer) {
 }
 
 function parseQmlFile(filePath) {
-  const fs = require('node:fs');
   const source = fs.readFileSync(filePath, 'utf8');
   return parseQml(source, path.resolve(filePath));
 }

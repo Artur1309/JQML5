@@ -76,12 +76,12 @@ function generateComponentFactory(component, moduleIdMap) {
   output += `      if (resolved.kind === 'runtime-component') {\n`;
   output += `        throw new Error('Component type cannot be directly instantiated. Use Component { ... } form.');\n`;
   output += `      }\n`;
-      output += `      const ctor = resolved.ctor || __runtime[typeName];\n`;
-      output += `      if (typeof ctor !== 'function') throw new Error('Missing runtime constructor for type: ' + typeName);\n`;
-      output += `      const isItemCtor = ctor === __runtime.Item || ctor.prototype instanceof __runtime.Item;\n`;
-      output += `      const ctorOptions = isItemCtor ? { ...options, parent: null } : options;\n`;
-      output += `      return new ctor(ctorOptions);\n`;
-      output += `    };\n`;
+  output += `      const ctor = resolved.ctor || __runtime[typeName];\n`;
+  output += `      if (typeof ctor !== 'function') throw new Error('Missing runtime constructor for type: ' + typeName);\n`;
+  output += `      const isItemCtor = ctor === __runtime.Item || ctor.prototype instanceof __runtime.Item;\n`;
+  output += `      const ctorOptions = isItemCtor ? { ...options, parent: null } : options;\n`;
+  output += `      return new ctor(ctorOptions);\n`;
+  output += `    };\n`;
   output += `    const __createObjectTree = (node, parent, scopeState) => {\n`;
   output += `      if (node.typeName === 'Component') {\n`;
   output += `        const templateNode = node.children[0] || null;\n`;
@@ -285,7 +285,7 @@ function normalizeImportPath(filePath) {
 
 function outputTypeFallbacks(typeResolution) {
   if (!typeResolution.length) {
-    typeResolution.push(`      __dummy: { kind: 'runtime', ctor: null },`);
+    typeResolution.push(`      __placeholderForEmptyMap: { kind: 'runtime', ctor: null },`);
   }
 }
 

@@ -3,8 +3,12 @@ const path = require('node:path');
 const { parseQmlFile } = require('./parser');
 const { CompilerError } = require('./errors');
 
-function isLocalImport(source) {
-  return source.startsWith('.') || source.includes('/') || source.endsWith('.qml');
+function isLocalImport(importNode) {
+  if (importNode.isLocal) {
+    return true;
+  }
+  const source = importNode.source;
+  return source.startsWith('.') || source.startsWith('/') || source.includes('\\') || source.endsWith('.qml');
 }
 
 function resolveEntry(entryFile, importPaths = []) {
@@ -38,7 +42,7 @@ function buildComponentGraph({ entryFile, importPaths, modules, typeRegistry }) 
     components.set(absPath, component);
 
     for (const imported of ast.imports) {
-      if (isLocalImport(imported.source)) {
+      if (isLocalImport(imported)) {
         const importedTypes = resolveLocalImport(absPath, imported.source, importPaths);
         for (const [name, resolvedPath] of importedTypes.entries()) {
           component.localTypes.set(name, resolvedPath);
