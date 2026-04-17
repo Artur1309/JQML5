@@ -1,0 +1,1 @@
+JQML5 compiler asset marker

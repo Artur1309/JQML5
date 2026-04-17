@@ -4,7 +4,15 @@
   "private": true,
   "type": "commonjs",
   "main": "src/runtime.js",
+  "bin": {
+    "jqmlc": "tools/jqmlc/index.js"
+  },
   "scripts": {
-    "test": "node --test"
+    "test": "node --test",
+    "build:example": "node ./tools/jqmlc/index.js ./examples/qml-app/Main.qml --outdir dist",
+    "dev:example": "node ./tools/jqmlc/dev-example.js"
+  },
+  "dependencies": {
+    "esbuild": "^0.25.11"
   }
 }
