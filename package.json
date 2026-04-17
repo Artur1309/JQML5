@@ -1,0 +1,10 @@
+{
+  "name": "jqml5",
+  "version": "0.1.0",
+  "private": true,
+  "type": "commonjs",
+  "main": "src/runtime.js",
+  "scripts": {
+    "test": "node --test"
+  }
+}
