@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>JQML5 Canvas Runtime Demo</title>
+    <style>
+      body { font-family: sans-serif; margin: 0; padding: 16px; background: #f2f4f8; }
+      canvas { border: 1px solid #bbb; background: white; }
+      p { margin: 10px 0 0; }
+    </style>
+  </head>
+  <body>
+    <canvas id="scene" width="520" height="320"></canvas>
+    <p id="status">Click the button rectangle</p>
+
+    <script src="../src/runtime.js"></script>
+    <script>
+      const runtime = window.JQML5;
+
+      const canvas = document.getElementById('scene');
+      const status = document.getElementById('status');
+
+      const rootContext = new runtime.Context(null, { title: 'Canvas Demo' });
+      const root = new runtime.Item();
+      root.width = canvas.width;
+      root.height = canvas.height;
+      root.setContext(rootContext);
+
+      const background = new runtime.Rectangle({ parentItem: root, color: '#dbe6ff' });
+      background.setAnchors({ fill: root });
+
+      const panel = new runtime.Rectangle({ parentItem: root, color: '#ffffff', borderColor: '#9eb8ff', borderWidth: 2, radius: 12 });
+      panel.setAnchors({ centerIn: root });
+      panel.width = 320;
+      panel.height = 180;
+
+      const buttonComponent = new runtime.Component(({ parent, componentScope }) => {
+        const button = new runtime.Rectangle({ parentItem: parent, componentScope, color: '#4a79ff', radius: 8, id: 'buttonRect' });
+        button.width = 180;
+        button.height = 60;
+        button.setAnchors({ centerIn: parent });
+
+        const hotZone = new runtime.MouseArea({ parentItem: button, componentScope });
+        hotZone.setAnchors({ fill: button });
+        hotZone.clicked.connect(() => {
+          status.textContent = `Clicked at ${new Date().toLocaleTimeString()}`;
+          counter.count += 1;
+          button.color = counter.highlight;
+          scene.renderer.render();
+        });
+
+        return button;
+      });
+
+      const counter = new runtime.Item();
+      counter.defineProperty('count', 0);
+      counter.defineProperty('highlight', '#4a79ff');
+      counter.highlight = new runtime.Binding(() => (counter.count % 2 === 0 ? '#4a79ff' : '#2f5ad7'));
+
+      const loader = new runtime.Loader({
+        parentItem: panel,
+        sourceComponent: buttonComponent,
+      });
+
+      const scene = new runtime.Scene({ rootItem: root, canvas });
+      scene.renderer.render();
+
+      setInterval(() => {
+        if (loader.item) {
+          loader.item.color = counter.highlight;
+          scene.renderer.render();
+        }
+      }, 250);
+    </script>
+  </body>
+</html>
