@@ -299,13 +299,28 @@ function parseValue(tokenizer, propertyName = '') {
   const char = tokenizer.current();
 
   if (char === '"' || char === "'") {
+    const checkpoint = tokenizer.location();
     const str = tokenizer.readString();
-    return {
-      kind: 'StringValue',
-      value: str.value,
-      raw: str.raw,
-      location: str.location,
-    };
+    // Peek ahead (on the same line) to detect compound expressions like "Item" + index
+    const afterStr = tokenizer.location();
+    tokenizer.skipWhitespaceAndComments({ preserveNewlines: true });
+    const nextChar = tokenizer.current();
+    tokenizer.index = afterStr.index;
+    tokenizer.line = afterStr.line;
+    tokenizer.column = afterStr.column;
+    if (/[+\-*/%<>=!&|?]/.test(nextChar)) {
+      // Compound expression — restore to start and fall through to readJsExpression
+      tokenizer.index = checkpoint.index;
+      tokenizer.line = checkpoint.line;
+      tokenizer.column = checkpoint.column;
+    } else {
+      return {
+        kind: 'StringValue',
+        value: str.value,
+        raw: str.raw,
+        location: str.location,
+      };
+    }
   }
 
   // Stage A: array literal [ item, item, ... ]

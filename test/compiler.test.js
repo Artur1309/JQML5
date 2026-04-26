@@ -1123,3 +1123,80 @@ Item {
   // echoMode enum must be resolved
   assert.match(js, /Normal/);
 });
+
+// ---------------------------------------------------------------------------
+// Fix: compound JS expressions in property bindings (string + ident, ternary)
+// ---------------------------------------------------------------------------
+
+test('parser: string concatenation binding "Item" + index parses as JsExpressionValue', () => {
+  const ast = parseQml(`
+import QtQuick 2.15
+Item {
+  Text {
+    text: "Item" + index
+  }
+}
+`, 'ConcatTest.qml');
+
+  const textItem = ast.rootObject.children[0];
+  assert.equal(textItem.typeName, 'Text');
+  const textProp = textItem.properties.find((p) => p.name === 'text');
+  assert.ok(textProp, 'text property should exist');
+  assert.equal(textProp.value.kind, 'JsExpressionValue');
+  assert.match(textProp.value.raw, /"\s*Item\s*"\s*\+\s*index/);
+});
+
+test('parser: ternary expression binding parses as JsExpressionValue', () => {
+  const ast = parseQml(`
+import QtQuick 2.15
+Rectangle {
+  color: (index % 2) == 0 ? "#f0f0f0" : "#e0e0e0"
+}
+`, 'TernaryTest.qml');
+
+  const colorProp = ast.rootObject.properties.find((p) => p.name === 'color');
+  assert.ok(colorProp, 'color property should exist');
+  assert.equal(colorProp.value.kind, 'JsExpressionValue');
+  assert.match(colorProp.value.raw, /\?/);
+  assert.match(colorProp.value.raw, /:/);
+});
+
+test('compiler: ListView delegate with string+index and ternary color compiles without error', async () => {
+  const fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), 'jqmlc-listview-expr-'));
+  const outdir = path.join(fixtureDir, 'out');
+  fs.mkdirSync(outdir, { recursive: true });
+
+  fs.writeFileSync(path.join(fixtureDir, 'Main.qml'), `
+import QtQuick 2.15
+
+Item {
+  width: 960
+  height: 640
+  ListView {
+    anchors.fill: parent
+    model: 50
+    delegate: Rectangle {
+      width: parent.width
+      height: 50
+      color: (index % 2) == 0 ? "#f0f0f0" : "#e0e0e0"
+      Text { text: "Item" + index; anchors.centerIn: parent }
+    }
+  }
+}
+`, 'utf8');
+
+  const result = await compileQmlApplication({
+    entryFile: path.join(fixtureDir, 'Main.qml'),
+    outdir,
+  });
+
+  assert.equal(result.componentCount >= 1, true);
+  const js = fs.readFileSync(path.join(outdir, 'app.js'), 'utf8');
+
+  // The generated bundle must contain the expression strings
+  assert.match(js, /Item/);
+  assert.match(js, /ListView/);
+  // Ternary and concatenation expressions must appear in AST embedded in bundle
+  assert.match(js, /#f0f0f0/);
+  assert.match(js, /#e0e0e0/);
+});
