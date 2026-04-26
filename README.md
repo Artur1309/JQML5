@@ -337,6 +337,18 @@ ListView {
         height: 40
     }
 }
+
+ListView {
+    width: 300
+    height: 400
+    model: 100
+    delegate: Component {
+        Rectangle {
+            width: 50
+            height: 50
+        }
+    }
+}
 ```
 
 ## Demo
@@ -381,6 +393,7 @@ Output:
   - `ListModel { ListElement { role: value; ... } ... }` – declarative model initialization
   - `ListElement` children auto-appended to parent `ListModel`
   - `delegate: Rectangle { ... }` – implicit `Component` wrapping for delegate properties
+  - `delegate: Component { Rectangle { ... } }` – explicit `Component` wrapping is also supported
   - `Repeater { model: ...; delegate: ... }` – full support
   - `ListView { model: ...; delegate: ... }` – full support
   - Delegate context exposes `index`, `model`, `modelData`, and all role names

@@ -462,3 +462,52 @@ Item {
   assert.match(js, /layer/);
   assert.match(js, /enabled/);
 });
+
+// ---------------------------------------------------------------------------
+// Fix: explicit `delegate: Component { ... }` syntax
+// ---------------------------------------------------------------------------
+
+test('delegate: Component { Rectangle { ... } } compiles to a factory that returns the root QObject', async () => {
+  const fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), 'jqmlc-delegate-component-'));
+  const outdir = path.join(fixtureDir, 'out');
+  fs.mkdirSync(outdir, { recursive: true });
+
+  fs.writeFileSync(path.join(fixtureDir, 'Main.qml'), `
+import QtQuick 2.15
+Item {
+  id: root
+  width: 960
+  height: 640
+
+  ListView {
+    id: list
+    anchors.fill: parent
+    model: 100
+    delegate: Component {
+      Rectangle {
+        width: 50
+        height: 50
+      }
+    }
+  }
+}
+`, 'utf8');
+
+  const result = await compileQmlApplication({
+    entryFile: path.join(fixtureDir, 'Main.qml'),
+    outdir,
+  });
+
+  assert.equal(result.componentCount >= 1, true);
+  const js = fs.readFileSync(path.join(outdir, 'app.js'), 'utf8');
+
+  // The generated bundle must contain a Component factory that returns the root
+  // QObject (Rectangle).  A bare `new __runtime.Component(...)` wrapping an
+  // explicit Component node would instead return another Component instance,
+  // triggering "Component factory must return a QObject instance."
+  assert.match(js, /ListView/);
+  assert.match(js, /new __runtime\.Component/);
+  // The inner factory created by __createObjectTree for Component { Rectangle }
+  // must reach the return statement that returns __createObjectTree(templateNode)
+  assert.match(js, /return __createObjectTree/);
+});

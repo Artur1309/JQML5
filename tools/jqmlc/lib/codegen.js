@@ -222,6 +222,13 @@ function generateComponentFactory(component, moduleIdMap) {
         // Stage B: implicitly wrap delegate object values in a Component
         if (propertyName === 'delegate') {
           const templateNode = valueNode.object;
+          // If the value is already an explicit Component { ... }, __createObjectTree
+          // handles it correctly and returns a runtime Component directly – avoid
+          // double-wrapping, which would cause the factory to return a Component
+          // instance instead of a QObject (triggering "must return a QObject" error).
+          if (templateNode.typeName === 'Component') {
+            return __createObjectTree(templateNode, object, scopeState);
+          }
           return new __runtime.Component(({ parent: componentParent, context, componentScope }) => {
             const nestedState = __createScopeState(componentParent, context, componentScope);
             return __createObjectTree(templateNode, componentParent, nestedState);
