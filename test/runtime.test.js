@@ -4254,7 +4254,7 @@ test('PinchHandler scales up on ctrl+wheel with negative deltaY', () => {
   const scene = new Scene({ rootItem: root });
   scene.dispatchWheel(100, 100, { ctrlKey: true, deltaX: 0, deltaY: -10, deltaMode: 0 });
 
-  assert.ok(scaleValues.length === 1, 'scaleChanged should fire');
+  assert.equal(scaleValues.length, 1, 'scaleChanged should fire exactly once');
   assert.ok(scaleValues[0] > 1.0, 'scale should increase on ctrl+wheelUp');
 });
 

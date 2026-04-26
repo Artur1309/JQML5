@@ -2274,6 +2274,9 @@ class DragHandler extends Item {
     this.defineProperty('dragTarget', null);
     // Minimum pixel distance before a drag is recognized (arbitration threshold)
     this.defineProperty('grabThreshold', options.grabThreshold ?? 5);
+    // grabPermissions mirrors the Qt PointerHandler API; exposed for QML-level
+    // configuration. The runtime currently enforces threshold-based arbitration
+    // rather than permission checks, but the property is available for future use.
     this.defineProperty('grabPermissions', options.grabPermissions ?? 'TakeOverForbidden');
 
     // activeChanged signal is automatically created by defineProperty('active')
@@ -2463,6 +2466,8 @@ class PinchHandler extends Item {
     }
 
     const dy = originalEvent.deltaY || 0;
+    // 1.1 / 0.9 ≈ ±10 % per scroll step, matching common browser pinch-zoom feel.
+    // Clamped to [0.01, 100] to prevent degenerate values.
     const factor = dy < 0 ? 1.1 : 0.9;
     const newScale = Math.max(0.01, Math.min(100, this.scale * factor));
 
