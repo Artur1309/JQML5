@@ -342,3 +342,123 @@ Item {
   const js = fs.readFileSync(path.join(outdir, 'app.js'), 'utf8');
   assert.match(js, /DragHandler/);
 });
+
+// ---------------------------------------------------------------------------
+// Stage E: Rendering improvements – compiler support
+// ---------------------------------------------------------------------------
+
+test('Stage E: compiler handles Image type in QML', async () => {
+  const fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), 'jqmlc-stage-e-image-'));
+  const outdir = path.join(fixtureDir, 'out');
+  fs.mkdirSync(outdir, { recursive: true });
+
+  fs.writeFileSync(path.join(fixtureDir, 'Main.qml'), `
+import QtQuick 2.15
+Item {
+  id: root
+  width: 400
+  height: 300
+
+  Image {
+    id: logo
+    x: 20
+    y: 20
+    width: 100
+    height: 80
+    source: "assets/logo.png"
+    fillMode: "PreserveAspectFit"
+  }
+}
+`, 'utf8');
+
+  const result = await compileQmlApplication({
+    entryFile: path.join(fixtureDir, 'Main.qml'),
+    outdir,
+  });
+
+  assert.equal(result.componentCount >= 1, true);
+  const js = fs.readFileSync(path.join(outdir, 'app.js'), 'utf8');
+  assert.match(js, /Image/);
+  assert.match(js, /logo\.png/);
+});
+
+test('Stage E: compiler handles clip, scale, rotation, transformOrigin properties', async () => {
+  const fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), 'jqmlc-stage-e-transforms-'));
+  const outdir = path.join(fixtureDir, 'out');
+  fs.mkdirSync(outdir, { recursive: true });
+
+  fs.writeFileSync(path.join(fixtureDir, 'Main.qml'), `
+import QtQuick 2.15
+Item {
+  id: root
+  width: 400
+  height: 400
+
+  Rectangle {
+    id: box
+    x: 100
+    y: 100
+    width: 120
+    height: 120
+    color: "#ff4444"
+    clip: true
+    scale: 1.5
+    rotation: 45
+    transformOrigin: "Center"
+  }
+}
+`, 'utf8');
+
+  const result = await compileQmlApplication({
+    entryFile: path.join(fixtureDir, 'Main.qml'),
+    outdir,
+  });
+
+  assert.equal(result.componentCount >= 1, true);
+  const js = fs.readFileSync(path.join(outdir, 'app.js'), 'utf8');
+  assert.match(js, /clip/);
+  assert.match(js, /scale/);
+  assert.match(js, /rotation/);
+  assert.match(js, /transformOrigin/);
+});
+
+test('Stage E: compiler handles layer.enabled property', async () => {
+  const fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), 'jqmlc-stage-e-layer-'));
+  const outdir = path.join(fixtureDir, 'out');
+  fs.mkdirSync(outdir, { recursive: true });
+
+  fs.writeFileSync(path.join(fixtureDir, 'Main.qml'), `
+import QtQuick 2.15
+Item {
+  id: root
+  width: 300
+  height: 300
+
+  Rectangle {
+    id: cachedGroup
+    x: 50
+    y: 50
+    width: 200
+    height: 200
+    color: "#112233"
+    layer.enabled: true
+
+    Rectangle {
+      x: 20; y: 20
+      width: 60; height: 60
+      color: "#ff0000"
+    }
+  }
+}
+`, 'utf8');
+
+  const result = await compileQmlApplication({
+    entryFile: path.join(fixtureDir, 'Main.qml'),
+    outdir,
+  });
+
+  assert.equal(result.componentCount >= 1, true);
+  const js = fs.readFileSync(path.join(outdir, 'app.js'), 'utf8');
+  assert.match(js, /layer/);
+  assert.match(js, /enabled/);
+});

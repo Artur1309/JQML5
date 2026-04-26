@@ -78,6 +78,8 @@ const RUNTIME_TYPES = [
   ['TextField', { kind: 'runtime', runtimeExport: 'TextField', category: 'controls', isItem: true }],
   ['Slider', { kind: 'runtime', runtimeExport: 'Slider', category: 'controls', isItem: true }],
   ['CheckBox', { kind: 'runtime', runtimeExport: 'CheckBox', category: 'controls', isItem: true }],
+  // Stage E: rendering improvements
+  ['Image', { kind: 'runtime', runtimeExport: 'Image', category: 'quick', isItem: true }],
 ];
 
 function createDefaultRegistries() {
@@ -90,7 +92,7 @@ function createDefaultRegistries() {
   modules.registerModule('QtQuick', {
     listTypes: () => [
       'Item', 'Rectangle', 'MouseArea', 'Loader', 'CanvasRenderer', 'Scene',
-      'Text',
+      'Text', 'Image',
       'Animation', 'NumberAnimation', 'ColorAnimation', 'SequentialAnimation', 'ParallelAnimation',
       'PropertyChanges', 'State', 'Transition', 'Behavior',
       'ListElement', 'ListModel', 'Repeater', 'ListView',
