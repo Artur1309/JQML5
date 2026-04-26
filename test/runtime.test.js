@@ -2357,3 +2357,235 @@ test('ListView with numeric model and explicit Component delegate does not throw
 
   assert.ok(listView.createdCount > 0, `Expected at least one delegate to be created, got ${listView.createdCount}`);
 });
+
+// ---------------------------------------------------------------------------
+// PR2: Row / Column / Flow positioner tests
+// ---------------------------------------------------------------------------
+
+test('Row positions children horizontally with spacing', async () => {
+  const { Row, Item } = require('../src/runtime');
+
+  const row = new Row();
+  const a = new Item({ parentItem: row });
+  a.width = 50; a.height = 30;
+  const b = new Item({ parentItem: row });
+  b.width = 60; b.height = 40;
+  const c = new Item({ parentItem: row });
+  c.width = 40; c.height = 20;
+
+  row.spacing = 5;
+
+  // Wait for async layout
+  await new Promise((r) => Promise.resolve().then(r));
+
+  assert.equal(a.x, 0);
+  assert.equal(b.x, 55);  // 50 + 5
+  assert.equal(c.x, 120); // 55 + 60 + 5
+  assert.equal(row.implicitWidth, 160); // 120 + 40
+  assert.equal(row.implicitHeight, 40); // tallest child
+});
+
+test('Row respects padding', async () => {
+  const { Row, Item } = require('../src/runtime');
+
+  const row = new Row();
+  row.padding = 10;
+  const a = new Item({ parentItem: row });
+  a.width = 50; a.height = 30;
+  const b = new Item({ parentItem: row });
+  b.width = 60; b.height = 40;
+
+  await new Promise((r) => Promise.resolve().then(r));
+
+  assert.equal(a.x, 10);
+  assert.equal(a.y, 10);
+  assert.equal(b.x, 60); // 10 + 50
+  assert.equal(row.implicitWidth, 130); // 10 + 50 + 60 + 10
+  assert.equal(row.implicitHeight, 60); // 10 + 40 + 10
+});
+
+test('Row RTL layoutDirection reverses child order', async () => {
+  const { Row, Item } = require('../src/runtime');
+
+  const row = new Row();
+  row.layoutDirection = 'RightToLeft';
+  row.spacing = 4;
+  const a = new Item({ parentItem: row });
+  a.width = 50; a.height = 20;
+  const b = new Item({ parentItem: row });
+  b.width = 30; b.height = 20;
+
+  await new Promise((r) => Promise.resolve().then(r));
+
+  // Total width = 50 + 4 + 30 = 84, implicitWidth = 84
+  // RTL: a is rightmost, so a.x = 84 - 50 = 34; b.x = 34 - 4 - 30 = 0
+  assert.equal(row.implicitWidth, 84);
+  assert.equal(a.x, 34);
+  assert.equal(b.x, 0);
+});
+
+test('Row ignores invisible children', async () => {
+  const { Row, Item } = require('../src/runtime');
+
+  const row = new Row();
+  row.spacing = 5;
+  const a = new Item({ parentItem: row });
+  a.width = 50; a.height = 20;
+  const hidden = new Item({ parentItem: row });
+  hidden.width = 50; hidden.height = 20;
+  hidden.visible = false;
+  const b = new Item({ parentItem: row });
+  b.width = 30; b.height = 20;
+
+  await new Promise((r) => Promise.resolve().then(r));
+
+  // Only a and b are visible: width = 50 + 5 + 30 = 85
+  assert.equal(row.implicitWidth, 85);
+  assert.equal(b.x, 55); // 50 + 5
+});
+
+test('Column positions children vertically with spacing', async () => {
+  const { Column, Item } = require('../src/runtime');
+
+  const col = new Column();
+  col.spacing = 8;
+  const a = new Item({ parentItem: col });
+  a.width = 100; a.height = 30;
+  const b = new Item({ parentItem: col });
+  b.width = 80; b.height = 40;
+  const c = new Item({ parentItem: col });
+  c.width = 120; c.height = 20;
+
+  await new Promise((r) => Promise.resolve().then(r));
+
+  assert.equal(a.y, 0);
+  assert.equal(b.y, 38);  // 30 + 8
+  assert.equal(c.y, 86);  // 38 + 40 + 8
+  assert.equal(col.implicitHeight, 106); // 86 + 20
+  assert.equal(col.implicitWidth, 120);  // widest child
+});
+
+test('Column respects padding', async () => {
+  const { Column, Item } = require('../src/runtime');
+
+  const col = new Column();
+  col.topPadding = 5;
+  col.bottomPadding = 5;
+  col.leftPadding = 8;
+  col.rightPadding = 8;
+  const a = new Item({ parentItem: col });
+  a.width = 50; a.height = 20;
+
+  await new Promise((r) => Promise.resolve().then(r));
+
+  assert.equal(a.x, 8);
+  assert.equal(a.y, 5);
+  assert.equal(col.implicitWidth, 66);  // 8 + 50 + 8
+  assert.equal(col.implicitHeight, 30); // 5 + 20 + 5
+});
+
+test('Flow LeftToRight wraps children based on available width', async () => {
+  const { Flow, Item } = require('../src/runtime');
+
+  const flow = new Flow();
+  flow.width = 120;
+  flow.spacing = 5;
+
+  // Three 50-wide items; width=120 means only 2 fit per row (50+5+50=105 ≤ 120, but 105+5+50=160 > 120)
+  const items = [];
+  for (let i = 0; i < 3; i++) {
+    const item = new Item({ parentItem: flow });
+    item.width = 50;
+    item.height = 30;
+    items.push(item);
+  }
+
+  await new Promise((r) => Promise.resolve().then(r));
+
+  // First row: items[0] at x=0, items[1] at x=55
+  assert.equal(items[0].x, 0);
+  assert.equal(items[0].y, 0);
+  assert.equal(items[1].x, 55);
+  assert.equal(items[1].y, 0);
+  // Second row: items[2] wraps
+  assert.equal(items[2].x, 0);
+  assert.equal(items[2].y, 35); // 30 + 5
+});
+
+test('Flow RTL right-aligns items', async () => {
+  const { Flow, Item } = require('../src/runtime');
+
+  const flow = new Flow();
+  flow.width = 200;
+  flow.layoutDirection = 'RightToLeft';
+  flow.spacing = 0;
+
+  const a = new Item({ parentItem: flow });
+  a.width = 60; a.height = 20;
+  const b = new Item({ parentItem: flow });
+  b.width = 80; b.height = 20;
+
+  await new Promise((r) => Promise.resolve().then(r));
+
+  // Total items fit in one row (60+80=140 ≤ 200).
+  // RTL: row right edge = pl + availW = 0 + 200 = 200, rowW = 140
+  // first item x = 200 - 140 = 60; second item x = 60 + 60 = 120
+  assert.equal(a.x, 60);
+  assert.equal(b.x, 120);
+});
+
+test('Flow TopToBottom wraps into columns', async () => {
+  const { Flow, Item } = require('../src/runtime');
+
+  const flow = new Flow();
+  flow.flow = 'TopToBottom';
+  flow.height = 70;  // only 2 items fit: 30+5+30=65 ≤ 70; 65+5+30=100 > 70
+  flow.spacing = 5;
+
+  // Three 30-tall items: first two fit, third wraps to a new column
+  const items = [];
+  for (let i = 0; i < 3; i++) {
+    const item = new Item({ parentItem: flow });
+    item.width = 40;
+    item.height = 30;
+    items.push(item);
+  }
+
+  await new Promise((r) => Promise.resolve().then(r));
+
+  assert.equal(items[0].x, 0);
+  assert.equal(items[0].y, 0);
+  assert.equal(items[1].x, 0);
+  assert.equal(items[1].y, 35); // 30 + 5
+  // Third item wraps to second column
+  assert.equal(items[2].x, 45); // 40 + 5
+  assert.equal(items[2].y, 0);
+});
+
+test('Row implicitWidth and implicitHeight update when child size changes', async () => {
+  const { Row, Item } = require('../src/runtime');
+
+  const row = new Row();
+  row.spacing = 0;
+  const a = new Item({ parentItem: row });
+  a.width = 50; a.height = 30;
+  const b = new Item({ parentItem: row });
+  b.width = 50; b.height = 20;
+
+  await new Promise((r) => Promise.resolve().then(r));
+  assert.equal(row.implicitWidth, 100);
+
+  b.width = 80;
+  await new Promise((r) => Promise.resolve().then(r));
+  assert.equal(row.implicitWidth, 130);
+});
+
+test('Column with empty children reports zero implicit size', async () => {
+  const { Column } = require('../src/runtime');
+
+  const col = new Column();
+  await new Promise((r) => Promise.resolve().then(r));
+
+  assert.equal(col.implicitWidth, 0);
+  assert.equal(col.implicitHeight, 0);
+});

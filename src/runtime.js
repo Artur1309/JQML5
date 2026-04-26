@@ -4537,6 +4537,362 @@ class CheckBox extends Item {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Stage PR2: Positioner base and Row / Column / Flow layout items
+// ---------------------------------------------------------------------------
+
+/**
+ * Positioner — base class for Row, Column, Flow.
+ *
+ * Provides:
+ *  - spacing, padding (and per-side paddingLeft/Right/Top/Bottom)
+ *  - layoutDirection ('LeftToRight' | 'RightToLeft')
+ *  - efficient child-watching: subscribes to x/y/width/height/
+ *    implicitWidth/implicitHeight/visible changes on each child item,
+ *    and to childItems list changes via overridden _addChildItem/_removeChildItem.
+ *  - _scheduleLayout() / _doLayout() (abstract in base; overridden by subclasses)
+ */
+class Positioner extends Item {
+  constructor(options = {}) {
+    super(options);
+
+    this._layoutScheduled = false;
+    this._childDisconnectors = new Map(); // child item → array of disconnect fns
+
+    this.defineProperty('spacing', 0, { onChanged: () => this._scheduleLayout() });
+    this.defineProperty('padding', 0, { onChanged: () => this._scheduleLayout() });
+    this.defineProperty('topPadding', undefined, { onChanged: () => this._scheduleLayout() });
+    this.defineProperty('bottomPadding', undefined, { onChanged: () => this._scheduleLayout() });
+    this.defineProperty('leftPadding', undefined, { onChanged: () => this._scheduleLayout() });
+    this.defineProperty('rightPadding', undefined, { onChanged: () => this._scheduleLayout() });
+    this.defineProperty('layoutDirection', 'LeftToRight', { onChanged: () => this._scheduleLayout() });
+
+    // Re-layout when our own width/height changes (needed for Flow)
+    this.connect('widthChanged', () => this._scheduleLayout());
+    this.connect('heightChanged', () => this._scheduleLayout());
+  }
+
+  // Resolved per-side padding helpers
+  _pt() { return this.topPadding !== undefined ? this.topPadding : this.padding; }
+  _pb() { return this.bottomPadding !== undefined ? this.bottomPadding : this.padding; }
+  _pl() { return this.leftPadding !== undefined ? this.leftPadding : this.padding; }
+  _pr() { return this.rightPadding !== undefined ? this.rightPadding : this.padding; }
+
+  // ------------------------------------------------------------------
+  // Child tracking
+  // ------------------------------------------------------------------
+
+  _watchChild(child) {
+    if (!(child instanceof Item)) return;
+    if (this._childDisconnectors.has(child)) return; // already watched
+
+    const disconnectors = [];
+    const schedule = () => this._scheduleLayout();
+    const watchedProps = ['x', 'y', 'width', 'height', 'implicitWidth', 'implicitHeight', 'visible'];
+    for (const prop of watchedProps) {
+      const signal = child[`${prop}Changed`];
+      if (signal && typeof signal.connect === 'function') {
+        disconnectors.push(signal.connect(schedule));
+      }
+    }
+    this._childDisconnectors.set(child, disconnectors);
+  }
+
+  _unwatchChild(child) {
+    const disconnectors = this._childDisconnectors.get(child);
+    if (!disconnectors) return;
+    for (const d of disconnectors) {
+      if (typeof d === 'function') d();
+    }
+    this._childDisconnectors.delete(child);
+  }
+
+  _addChildItem(child) {
+    super._addChildItem(child);
+    this._watchChild(child);
+    this._scheduleLayout();
+  }
+
+  _removeChildItem(child) {
+    this._unwatchChild(child);
+    super._removeChildItem(child);
+    this._scheduleLayout();
+  }
+
+  // ------------------------------------------------------------------
+  // Layout scheduling
+  // ------------------------------------------------------------------
+
+  _scheduleLayout() {
+    if (this._layoutScheduled) return;
+    this._layoutScheduled = true;
+    // Micro-task: batch multiple changes into one layout pass
+    Promise.resolve().then(() => {
+      this._layoutScheduled = false;
+      this._doLayout();
+    });
+  }
+
+  /** Subclasses override this to perform their layout pass. */
+  _doLayout() {}
+
+  /** Effective (visible) children eligible for placement. */
+  _layoutChildren() {
+    return this._childItems.filter((c) => c.visible !== false);
+  }
+
+  /** Effective size of a child: prefer explicit width/height, then implicit. */
+  static _childW(child) { return child.width || child.implicitWidth || 0; }
+  static _childH(child) { return child.height || child.implicitHeight || 0; }
+}
+
+// ---------------------------------------------------------------------------
+// Row
+// ---------------------------------------------------------------------------
+
+class Row extends Positioner {
+  constructor(options = {}) {
+    super(options);
+  }
+
+  _doLayout() {
+    const children = this._layoutChildren();
+    if (children.length === 0) {
+      this.implicitWidth = this._pl() + this._pr();
+      this.implicitHeight = this._pt() + this._pb();
+      return;
+    }
+
+    const rtl = this.layoutDirection === 'RightToLeft';
+    const spacing = this.spacing || 0;
+    const pt = this._pt();
+    const pl = this._pl();
+    const pr = this._pr();
+    const pb = this._pb();
+
+    if (rtl) {
+      // In RTL mode, lay out right-to-left starting from x = pl,
+      // but in Qt the children are placed so the rightmost child ends at
+      // (implicitWidth - pr).  We compute total width first, then place.
+      let totalW = 0;
+      let maxH = 0;
+      for (let i = 0; i < children.length; i++) {
+        totalW += Positioner._childW(children[i]);
+        if (i < children.length - 1) totalW += spacing;
+        const ch = Positioner._childH(children[i]);
+        if (ch > maxH) maxH = ch;
+      }
+      const implW = pl + totalW + pr;
+      const implH = pt + maxH + pb;
+
+      // Place children right-to-left
+      let cursor = pl + totalW;
+      for (const child of children) {
+        const cw = Positioner._childW(child);
+        cursor -= cw;
+        child.x = cursor;
+        child.y = pt;
+        cursor -= spacing;
+      }
+
+      this.implicitWidth = implW;
+      this.implicitHeight = implH;
+    } else {
+      // LTR
+      let cursor = pl;
+      let maxH = 0;
+      for (let i = 0; i < children.length; i++) {
+        const child = children[i];
+        child.x = cursor;
+        child.y = pt;
+        const cw = Positioner._childW(child);
+        const ch = Positioner._childH(child);
+        cursor += cw;
+        if (i < children.length - 1) cursor += spacing;
+        if (ch > maxH) maxH = ch;
+      }
+      this.implicitWidth = cursor + pr;
+      this.implicitHeight = pt + maxH + pb;
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Column
+// ---------------------------------------------------------------------------
+
+class Column extends Positioner {
+  constructor(options = {}) {
+    super(options);
+  }
+
+  _doLayout() {
+    const children = this._layoutChildren();
+    if (children.length === 0) {
+      this.implicitWidth = this._pl() + this._pr();
+      this.implicitHeight = this._pt() + this._pb();
+      return;
+    }
+
+    const spacing = this.spacing || 0;
+    const pt = this._pt();
+    const pl = this._pl();
+    const pr = this._pr();
+    const pb = this._pb();
+
+    let cursor = pt;
+    let maxW = 0;
+    for (let i = 0; i < children.length; i++) {
+      const child = children[i];
+      child.x = pl;
+      child.y = cursor;
+      const cw = Positioner._childW(child);
+      const ch = Positioner._childH(child);
+      cursor += ch;
+      if (i < children.length - 1) cursor += spacing;
+      if (cw > maxW) maxW = cw;
+    }
+
+    this.implicitWidth = pl + maxW + pr;
+    this.implicitHeight = cursor + pb;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Flow
+// ---------------------------------------------------------------------------
+
+class Flow extends Positioner {
+  constructor(options = {}) {
+    super(options);
+
+    // 'LeftToRight': wrap into rows  (wraps when row exceeds width)
+    // 'TopToBottom': wrap into columns (wraps when column exceeds height)
+    this.defineProperty('flow', 'LeftToRight', { onChanged: () => this._scheduleLayout() });
+  }
+
+  _doLayout() {
+    if (this.flow === 'TopToBottom') {
+      this._doLayoutTopToBottom();
+    } else {
+      this._doLayoutLeftToRight();
+    }
+  }
+
+  _doLayoutLeftToRight() {
+    const children = this._layoutChildren();
+    const spacing = this.spacing || 0;
+    const pt = this._pt();
+    const pl = this._pl();
+    const pr = this._pr();
+    const pb = this._pb();
+    const rtl = this.layoutDirection === 'RightToLeft';
+
+    // Available width for content (0 means no wrapping constraint)
+    const availW = (this.width || 0) - pl - pr;
+
+    let rowStartX = pl;
+    let rowY = pt;
+    let rowItems = [];
+    let rowW = 0;
+    let maxRowH = 0;
+    let totalImplW = 0;
+
+    const placeRow = () => {
+      if (rowItems.length === 0) return;
+      let x;
+      if (rtl) {
+        // Right-align the row within availW (or within rowW if no width set)
+        const rowRight = availW > 0 ? pl + availW : pl + rowW;
+        x = rowRight - rowW;
+      } else {
+        x = rowStartX;
+      }
+      for (const child of rowItems) {
+        child.x = x;
+        child.y = rowY;
+        x += Positioner._childW(child) + spacing;
+      }
+      if (rowW > totalImplW) totalImplW = rowW;
+      rowY += maxRowH + spacing;
+      rowItems = [];
+      rowW = 0;
+      maxRowH = 0;
+    };
+
+    for (const child of children) {
+      const cw = Positioner._childW(child);
+      const ch = Positioner._childH(child);
+
+      const needed = rowItems.length > 0 ? rowW + spacing + cw : cw;
+      // Wrap if we have a known width and the row would overflow
+      if (availW > 0 && rowItems.length > 0 && needed > availW) {
+        placeRow();
+      }
+
+      rowItems.push(child);
+      rowW = rowItems.length > 1 ? rowW + spacing + cw : cw;
+      if (ch > maxRowH) maxRowH = ch;
+    }
+    placeRow(); // flush last row
+
+    this.implicitWidth = pl + totalImplW + pr;
+    this.implicitHeight = rowY - (children.length > 0 ? spacing : 0) + pb;
+  }
+
+  _doLayoutTopToBottom() {
+    const children = this._layoutChildren();
+    const spacing = this.spacing || 0;
+    const pt = this._pt();
+    const pl = this._pl();
+    const pr = this._pr();
+    const pb = this._pb();
+
+    // Available height for content (0 means no wrapping constraint)
+    const availH = (this.height || 0) - pt - pb;
+
+    let colX = pl;
+    let colStartY = pt;
+    let colItems = [];
+    let colH = 0;
+    let maxColW = 0;
+    let totalImplH = 0;
+
+    const placeCol = () => {
+      if (colItems.length === 0) return;
+      let y = colStartY;
+      for (const child of colItems) {
+        child.x = colX;
+        child.y = y;
+        y += Positioner._childH(child) + spacing;
+      }
+      if (colH > totalImplH) totalImplH = colH;
+      colX += maxColW + spacing;
+      colItems = [];
+      colH = 0;
+      maxColW = 0;
+    };
+
+    for (const child of children) {
+      const cw = Positioner._childW(child);
+      const ch = Positioner._childH(child);
+
+      const needed = colItems.length > 0 ? colH + spacing + ch : ch;
+      if (availH > 0 && colItems.length > 0 && needed > availH) {
+        placeCol();
+      }
+
+      colItems.push(child);
+      colH = colItems.length > 1 ? colH + spacing + ch : ch;
+      if (cw > maxColW) maxColW = cw;
+    }
+    placeCol();
+
+    this.implicitWidth = colX - (children.length > 0 ? spacing : 0) + pr;
+    this.implicitHeight = pt + totalImplH + pb;
+  }
+}
+
 const runtimeExports = {
   Signal,
   Binding,
@@ -4584,6 +4940,11 @@ const runtimeExports = {
   CheckBox,
   // Stage E: rendering improvements
   Image,
+  // PR2: layout positioners
+  Positioner,
+  Row,
+  Column,
+  Flow,
 };
 
 if (typeof module !== 'undefined' && module.exports) {

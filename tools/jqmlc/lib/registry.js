@@ -68,6 +68,11 @@ const RUNTIME_TYPES = [
   ['Repeater', { kind: 'runtime', runtimeExport: 'Repeater', category: 'quick-model', isItem: true }],
   ['Flickable', { kind: 'runtime', runtimeExport: 'Flickable', category: 'quick-model', isItem: true }],
   ['ListView', { kind: 'runtime', runtimeExport: 'ListView', category: 'quick-model', isItem: true }],
+  // PR2: layout positioners
+  ['Positioner', { kind: 'runtime', runtimeExport: 'Positioner', category: 'quick-layout', isItem: true }],
+  ['Row', { kind: 'runtime', runtimeExport: 'Row', category: 'quick-layout', isItem: true }],
+  ['Column', { kind: 'runtime', runtimeExport: 'Column', category: 'quick-layout', isItem: true }],
+  ['Flow', { kind: 'runtime', runtimeExport: 'Flow', category: 'quick-layout', isItem: true }],
   // Stage C: focus / keys / pointer handlers
   ['Keys', { kind: 'runtime', runtimeExport: 'Keys', category: 'quick-input' }],
   ['TapHandler', { kind: 'runtime', runtimeExport: 'TapHandler', category: 'quick-input', isItem: true }],
@@ -97,6 +102,7 @@ function createDefaultRegistries() {
       'Animation', 'NumberAnimation', 'ColorAnimation', 'SequentialAnimation', 'ParallelAnimation',
       'PropertyChanges', 'State', 'Transition', 'Behavior',
       'ListElement', 'ListModel', 'Repeater', 'Flickable', 'ListView',
+      'Row', 'Column', 'Flow',
       'TapHandler', 'DragHandler',
     ],
   });
