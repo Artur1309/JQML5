@@ -1980,8 +1980,8 @@ test('Text._fontString builds correct CSS font string', () => {
 });
 
 test('Text.draw uses measurement cache for elide', () => {
-  const measureCalls = [];
   let callCount = 0;
+  const drawnTexts = [];
 
   const fakeCtx = {
     font: '',
@@ -1989,28 +1989,33 @@ test('Text.draw uses measurement cache for elide', () => {
     textBaseline: '',
     measureText: (str) => {
       callCount += 1;
-      // Return large width to trigger elide
+      // Return large width to trigger elide (20px per character)
       return { width: str.length * 20 };
     },
-    fillText: (str) => { measureCalls.push(str); },
+    fillText: (str) => { drawnTexts.push(str); },
   };
 
+  // Use a font string unlikely to be in the cache from other tests
   const t = new Text({
-    text: 'Hello World',
-    font: { family: 'sans-serif', pixelSize: 14, bold: false },
+    text: 'ElideTestString__unique__' + Date.now(),
+    font: { family: 'monospace', pixelSize: 99, bold: true },
     elide: 'ElideRight',
-    width: 60, // small → will elide
   });
-  t.width = 60;
+  // width must be set after construction (Item doesn't pick it up from options)
+  t.width = 60; // small → will elide
 
-  // First draw
+  // First draw: should call measureText (cache miss)
   t.draw(fakeCtx);
   const firstCallCount = callCount;
-  assert.ok(firstCallCount > 0, 'Should have called measureText');
+  assert.ok(firstCallCount > 0, 'Should have called measureText on first draw');
+  assert.ok(drawnTexts.length > 0, 'Should have drawn some text');
+  assert.ok(drawnTexts[0].endsWith('…'), 'Should have elided the text with ellipsis');
 
-  // Second draw with same text and font should use cache
+  // Second draw: same text+font combination → cache hits reduce new measureText calls
+  const callsBefore = callCount;
   t.draw(fakeCtx);
-  // Due to caching, total calls should not double (same key re-used)
-  // The cache in _textMeasureCache is module-level, so hits reduce calls
-  assert.ok(callCount < firstCallCount * 2, 'Caching should reduce measureText calls on second draw');
+  const newCalls = callCount - callsBefore;
+  // The ellipsis character ('…') itself is a new cache key, but the base text is cached.
+  // Net new calls must be fewer than on the first draw (which measured many substrings).
+  assert.ok(newCalls < firstCallCount, `Second draw (${newCalls} new calls) should use cache more than first (${firstCallCount} calls)`);
 });

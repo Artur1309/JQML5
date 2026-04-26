@@ -2839,7 +2839,7 @@ class Image extends Item {
       _imageCache.set(src, { img, status: Image.Ready });
       this._htmlImage = img;
       this._setPropertyValue('status', Image.Ready);
-      if (this._layer) this._layer._dirty = true;
+      if (this._layer) this._invalidateLayer();
     };
     img.onerror = () => {
       _imageCache.set(src, { img: null, status: Image.Error });
