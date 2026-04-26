@@ -1996,12 +1996,13 @@ test('DragHandler tracks active state and translation', () => {
 
   const scene = new Scene({ rootItem: root });
 
-  // press inside draggable
+  // press inside draggable — active remains false until drag threshold is exceeded
   scene.dispatchPointer('down', 100, 100);
-  assert.equal(handler.active, true);
+  assert.equal(handler.active, false);
 
-  // move
+  // move beyond the grab threshold (default 5 px) — now active
   scene.dispatchPointer('move', 120, 130);
+  assert.equal(handler.active, true);
   assert.equal(handler.translation.x, 20);
   assert.equal(handler.translation.y, 30);
 
@@ -4083,4 +4084,261 @@ test('StackView push with factory function creates item', () => {
   assert.equal(created, true, 'factory should have been called');
   assert.ok(result instanceof Rectangle);
   assert.equal(sv.depth, 1);
+});
+
+// ---------------------------------------------------------------------------
+// Stage H: HoverHandler
+// ---------------------------------------------------------------------------
+
+test('HoverHandler enter/leave toggles hovered and emits signals', () => {
+  const { Item, HoverHandler, Scene } = require('../src/runtime');
+
+  const root = new Item();
+  root.width = 200; root.height = 200;
+
+  const handler = new HoverHandler({ parentItem: root });
+  handler.width = 100; handler.height = 100;
+
+  const events = [];
+  handler.entered.connect(() => events.push('entered'));
+  handler.exited.connect(() => events.push('exited'));
+
+  const scene = new Scene({ rootItem: root });
+
+  // move inside bounds → enter
+  scene.dispatchPointer('move', 50, 50);
+  assert.equal(handler.hovered, true, 'should be hovered after move inside');
+  assert.deepEqual(handler.point, { x: 50, y: 50 }, 'point should track cursor');
+
+  // move outside bounds → leave
+  scene.dispatchPointer('move', 150, 150);
+  assert.equal(handler.hovered, false, 'should not be hovered after move outside');
+
+  assert.deepEqual(events, ['entered', 'exited']);
+});
+
+test('HoverHandler point updates while hovered', () => {
+  const { Item, HoverHandler, Scene } = require('../src/runtime');
+
+  const root = new Item();
+  root.width = 200; root.height = 200;
+
+  const handler = new HoverHandler({ parentItem: root });
+  handler.width = 100; handler.height = 100;
+
+  const scene = new Scene({ rootItem: root });
+
+  scene.dispatchPointer('move', 20, 30);
+  assert.deepEqual(handler.point, { x: 20, y: 30 });
+
+  scene.dispatchPointer('move', 60, 70);
+  assert.deepEqual(handler.point, { x: 60, y: 70 });
+});
+
+test('HoverHandler clearAllHovers clears hovered state', () => {
+  const { Item, HoverHandler, Scene } = require('../src/runtime');
+
+  const root = new Item();
+  root.width = 200; root.height = 200;
+
+  const handler = new HoverHandler({ parentItem: root });
+  handler.width = 100; handler.height = 100;
+
+  const scene = new Scene({ rootItem: root });
+
+  scene.dispatchPointer('move', 50, 50);
+  assert.equal(handler.hovered, true);
+
+  scene._clearAllHovers();
+  assert.equal(handler.hovered, false);
+});
+
+// ---------------------------------------------------------------------------
+// Stage H: WheelHandler
+// ---------------------------------------------------------------------------
+
+test('WheelHandler emits wheel signal when cursor is over item', () => {
+  const { Item, WheelHandler, Scene } = require('../src/runtime');
+
+  const root = new Item();
+  root.width = 200; root.height = 200;
+
+  const handler = new WheelHandler({ parentItem: root });
+  handler.width = 100; handler.height = 100;
+
+  const wheelEvents = [];
+  handler.wheel.connect((e) => wheelEvents.push(e));
+
+  const scene = new Scene({ rootItem: root });
+  scene.dispatchWheel(50, 50, { deltaX: 0, deltaY: 100, deltaMode: 0 });
+
+  assert.equal(wheelEvents.length, 1, 'wheel signal should fire once');
+  assert.equal(wheelEvents[0].deltaY, 100);
+});
+
+test('WheelHandler does not fire when cursor is outside bounds', () => {
+  const { Item, WheelHandler, Scene } = require('../src/runtime');
+
+  const root = new Item();
+  root.width = 200; root.height = 200;
+
+  // handler covers only top-left quadrant
+  const handler = new WheelHandler({ parentItem: root });
+  handler.width = 100; handler.height = 100;
+
+  let fired = false;
+  handler.wheel.connect(() => { fired = true; });
+
+  const scene = new Scene({ rootItem: root });
+  scene.dispatchWheel(150, 150, { deltaX: 0, deltaY: 100, deltaMode: 0 });
+
+  assert.equal(fired, false, 'wheel should not fire outside handler bounds');
+});
+
+test('WheelHandler orientation=horizontal ignores vertical scroll', () => {
+  const { Item, WheelHandler, Scene } = require('../src/runtime');
+
+  const root = new Item();
+  root.width = 200; root.height = 200;
+
+  const handler = new WheelHandler({ parentItem: root, orientation: 'horizontal' });
+  handler.width = 200; handler.height = 200;
+
+  let fired = false;
+  handler.wheel.connect(() => { fired = true; });
+
+  const scene = new Scene({ rootItem: root });
+  scene.dispatchWheel(50, 50, { deltaX: 0, deltaY: 100, deltaMode: 0 });
+
+  assert.equal(fired, false, 'horizontal WheelHandler should ignore vertical scroll');
+});
+
+test('WheelHandler with no dimensions uses parent containsPoint', () => {
+  const { Item, WheelHandler, Scene } = require('../src/runtime');
+
+  const root = new Item();
+  root.width = 200; root.height = 200;
+
+  const parent = new Item({ parentItem: root });
+  parent.x = 0; parent.y = 0;
+  parent.width = 100; parent.height = 100;
+
+  // WheelHandler has no explicit bounds; should use parent item
+  const handler = new WheelHandler({ parentItem: parent });
+
+  let fired = false;
+  handler.wheel.connect(() => { fired = true; });
+
+  const scene = new Scene({ rootItem: root });
+  scene.dispatchWheel(50, 50, { deltaX: 0, deltaY: 50, deltaMode: 0 });
+
+  assert.equal(fired, true, 'WheelHandler should fire when cursor is over parent');
+});
+
+// ---------------------------------------------------------------------------
+// Stage H: PinchHandler (ctrl+wheel fallback)
+// ---------------------------------------------------------------------------
+
+test('PinchHandler scales up on ctrl+wheel with negative deltaY', () => {
+  const { Item, PinchHandler, Scene } = require('../src/runtime');
+
+  const root = new Item();
+  root.width = 200; root.height = 200;
+
+  const handler = new PinchHandler({ parentItem: root });
+  handler.width = 200; handler.height = 200;
+
+  const scaleValues = [];
+  handler.scaleChanged.connect((s) => scaleValues.push(s));
+
+  const scene = new Scene({ rootItem: root });
+  scene.dispatchWheel(100, 100, { ctrlKey: true, deltaX: 0, deltaY: -10, deltaMode: 0 });
+
+  assert.equal(scaleValues.length, 1, 'scaleChanged should fire exactly once');
+  assert.ok(scaleValues[0] > 1.0, 'scale should increase on ctrl+wheelUp');
+});
+
+test('PinchHandler scales down on ctrl+wheel with positive deltaY', () => {
+  const { Item, PinchHandler, Scene } = require('../src/runtime');
+
+  const root = new Item();
+  root.width = 200; root.height = 200;
+
+  const handler = new PinchHandler({ parentItem: root });
+  handler.width = 200; handler.height = 200;
+
+  const scene = new Scene({ rootItem: root });
+  scene.dispatchWheel(100, 100, { ctrlKey: true, deltaX: 0, deltaY: 10, deltaMode: 0 });
+
+  assert.ok(handler.scale < 1.0, 'scale should decrease on ctrl+wheelDown');
+});
+
+test('PinchHandler ignores wheel without ctrlKey', () => {
+  const { Item, PinchHandler, Scene } = require('../src/runtime');
+
+  const root = new Item();
+  root.width = 200; root.height = 200;
+
+  const handler = new PinchHandler({ parentItem: root });
+  handler.width = 200; handler.height = 200;
+
+  const scene = new Scene({ rootItem: root });
+  const initialScale = handler.scale;
+  scene.dispatchWheel(100, 100, { ctrlKey: false, deltaX: 0, deltaY: 50, deltaMode: 0 });
+
+  assert.equal(handler.scale, initialScale, 'scale should not change without ctrlKey');
+});
+
+// ---------------------------------------------------------------------------
+// Stage H: Drag + Tap arbitration
+// ---------------------------------------------------------------------------
+
+test('TapHandler fires when DragHandler threshold is not exceeded', () => {
+  const { Item, TapHandler, DragHandler, Scene } = require('../src/runtime');
+
+  const root = new Item();
+  root.width = 200; root.height = 200;
+
+  // TapHandler and DragHandler on the same parent item at the same area.
+  // TapHandler has higher z so it is hit-tested first.
+  const tap = new TapHandler({ parentItem: root });
+  tap.width = 100; tap.height = 100; tap.z = 1;
+
+  const drag = new DragHandler({ parentItem: root });
+  drag.width = 100; drag.height = 100; drag.z = 0;
+
+  let tapped = 0;
+  tap.tapped.connect(() => { tapped += 1; });
+
+  const scene = new Scene({ rootItem: root });
+  scene.dispatchPointer('down', 50, 50);
+  // No move – pointer stays in place (no drag)
+  scene.dispatchPointer('up', 50, 50);
+
+  assert.equal(tapped, 1, 'TapHandler should fire when no drag threshold exceeded');
+  assert.equal(drag.active, false, 'DragHandler should remain inactive');
+});
+
+test('DragHandler activates when move exceeds grab threshold', () => {
+  const { Item, DragHandler, Scene } = require('../src/runtime');
+
+  const root = new Item();
+  root.width = 400; root.height = 400;
+
+  const box = new Item({ parentItem: root });
+  box.x = 0; box.y = 0;
+  box.width = 200; box.height = 200;
+
+  const handler = new DragHandler({ parentItem: box });
+  handler.width = 200; handler.height = 200;
+
+  const scene = new Scene({ rootItem: root });
+  scene.dispatchPointer('down', 50, 50);
+  // Move only 2px – below default threshold of 5px
+  scene.dispatchPointer('move', 52, 50);
+  assert.equal(handler.active, false, 'should not activate below threshold');
+
+  // Move further to exceed threshold
+  scene.dispatchPointer('move', 60, 60);
+  assert.equal(handler.active, true, 'should activate after exceeding threshold');
 });

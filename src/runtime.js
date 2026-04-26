@@ -2267,10 +2267,17 @@ class DragHandler extends Item {
     this._pressedSceneY = 0;
     this._pressedTargetX = 0;
     this._pressedTargetY = 0;
+    this._pendingPress = false;
 
     this.defineProperty('active', false);
     this.defineProperty('translation', { x: 0, y: 0 });
     this.defineProperty('dragTarget', null);
+    // Minimum pixel distance before a drag is recognized (arbitration threshold)
+    this.defineProperty('grabThreshold', options.grabThreshold ?? 5);
+    // grabPermissions mirrors the Qt PointerHandler API; exposed for QML-level
+    // configuration. The runtime currently enforces threshold-based arbitration
+    // rather than permission checks, but the property is available for future use.
+    this.defineProperty('grabPermissions', options.grabPermissions ?? 'TakeOverForbidden');
 
     // activeChanged signal is automatically created by defineProperty('active')
   }
@@ -2293,28 +2300,182 @@ class DragHandler extends Item {
         this._pressedTargetX = target.x;
         this._pressedTargetY = target.y;
       }
-      this._setPropertyValue('active', true);
-      return true;
+      // Don't grab immediately – wait for threshold to be exceeded
+      this._pendingPress = true;
+      return false;
     }
 
-    if (type === 'move' && this.active) {
+    if (type === 'move') {
       const dx = event.sceneX - this._pressedSceneX;
       const dy = event.sceneY - this._pressedSceneY;
-      this._setPropertyValue('translation', { x: dx, y: dy });
-      const target = this._dragItem;
-      if (target) {
-        target.x = this._pressedTargetX + dx;
-        target.y = this._pressedTargetY + dy;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+
+      if (!this.active && this._pendingPress && dist >= this.grabThreshold) {
+        // Crossed threshold – activate the drag
+        this._setPropertyValue('active', true);
       }
-      return true;
+
+      if (this.active) {
+        this._setPropertyValue('translation', { x: dx, y: dy });
+        const target = this._dragItem;
+        if (target) {
+          target.x = this._pressedTargetX + dx;
+          target.y = this._pressedTargetY + dy;
+        }
+        return true;
+      }
+      return false;
     }
 
-    if (type === 'up' && this.active) {
-      this._setPropertyValue('active', false);
-      return true;
+    if (type === 'up') {
+      this._pendingPress = false;
+      if (this.active) {
+        this._setPropertyValue('active', false);
+        return true;
+      }
+      return false;
     }
 
     return false;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Stage H: HoverHandler
+// ---------------------------------------------------------------------------
+
+class HoverHandler extends Item {
+  constructor(options = {}) {
+    super(options);
+
+    this.defineProperty('hovered', false);
+    this.defineProperty('point', { x: 0, y: 0 });
+    this.defineProperty('acceptedDevices', options.acceptedDevices ?? 'all');
+
+    this.defineSignal('entered');
+    this.defineSignal('exited');
+  }
+
+  // Called by Scene._dispatchHover on every pointer move
+  _updateHover(sceneX, sceneY) {
+    if (!this.enabled || !this.visible) {
+      this._clearHover();
+      return;
+    }
+
+    const isOver = this.containsPoint(sceneX, sceneY);
+    if (isOver && !this.hovered) {
+      const local = this.mapFromItem(null, sceneX, sceneY);
+      this._setPropertyValue('point', { x: local.x, y: local.y });
+      this._setPropertyValue('hovered', true);
+      this.entered.emit();
+    } else if (!isOver && this.hovered) {
+      this._clearHover();
+    } else if (isOver) {
+      const local = this.mapFromItem(null, sceneX, sceneY);
+      this._setPropertyValue('point', { x: local.x, y: local.y });
+    }
+  }
+
+  _clearHover() {
+    if (this.hovered) {
+      this._setPropertyValue('hovered', false);
+      this.exited.emit();
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Stage H: WheelHandler
+// ---------------------------------------------------------------------------
+
+class WheelHandler extends Item {
+  constructor(options = {}) {
+    super(options);
+
+    this.defineProperty('orientation', options.orientation ?? 'vertical');
+    this.defineProperty('active', false);
+    this.defineProperty('acceptedDevices', options.acceptedDevices ?? 'all');
+
+    this.defineSignal('wheel');
+  }
+
+  handleWheelEvent(originalEvent, sceneX, sceneY) {
+    if (!this.enabled || !this.visible) return false;
+
+    // If we have dimensions, check containsPoint; otherwise use parent bounds
+    const hasOwnBounds = (this.width > 0 || this.height > 0);
+    const checkItem = hasOwnBounds ? this : this.parentItem;
+    if (checkItem && sceneX !== undefined && !checkItem.containsPoint(sceneX, sceneY)) {
+      return false;
+    }
+
+    const orientation = this.orientation;
+    const dx = originalEvent.deltaX || 0;
+    const dy = originalEvent.deltaY || 0;
+
+    const relevant =
+      orientation === 'both' ||
+      (orientation === 'vertical' && dy !== 0) ||
+      (orientation === 'horizontal' && dx !== 0);
+
+    if (!relevant) return false;
+
+    this._setPropertyValue('active', true);
+
+    const evt = {
+      deltaX: dx,
+      deltaY: dy,
+      deltaMode: originalEvent.deltaMode || 0,
+      accepted: false,
+      originalEvent,
+    };
+
+    this.wheel.emit(evt);
+    this._setPropertyValue('active', false);
+    return true;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Stage H: PinchHandler (MVP – ctrl+wheel as pinch fallback)
+// ---------------------------------------------------------------------------
+
+class PinchHandler extends Item {
+  constructor(options = {}) {
+    super(options);
+
+    this.defineProperty('active', false);
+    // 'scale' and 'rotation' are inherited from Item; set initial values if provided.
+    // 'scaleChanged' and 'rotationChanged' are created by Item's defineProperty('scale')
+    // and defineProperty('rotation') respectively.
+    if (options.scale !== undefined) this.scale = options.scale;
+    if (options.rotation !== undefined) this.rotation = options.rotation;
+    this.defineProperty('centroid', { x: 0, y: 0 });
+  }
+
+  handleWheelEvent(originalEvent, sceneX, sceneY) {
+    // ctrl+wheel is the browser pinch fallback
+    if (!originalEvent.ctrlKey) return false;
+    if (!this.enabled || !this.visible) return false;
+
+    const hasOwnBounds = (this.width > 0 || this.height > 0);
+    const checkItem = hasOwnBounds ? this : this.parentItem;
+    if (checkItem && sceneX !== undefined && !checkItem.containsPoint(sceneX, sceneY)) {
+      return false;
+    }
+
+    const dy = originalEvent.deltaY || 0;
+    // 1.1 / 0.9 ≈ ±10 % per scroll step, matching common browser pinch-zoom feel.
+    // Clamped to [0.01, 100] to prevent degenerate values.
+    const factor = dy < 0 ? 1.1 : 0.9;
+    const newScale = Math.max(0.01, Math.min(100, this.scale * factor));
+
+    const local = (checkItem || this).mapFromItem(null, sceneX, sceneY);
+    this._setPropertyValue('centroid', { x: local.x, y: local.y });
+    // _setPropertyValue emits scaleChanged automatically
+    this._setPropertyValue('scale', newScale);
+    return true;
   }
 }
 
@@ -2588,10 +2749,14 @@ class Scene {
       keyup: (event) => {
         this.dispatchKey('released', event);
       },
-      // Flickable: wheel events
+      // Flickable / WheelHandler: wheel events
       wheel: (event) => {
         const point = toScenePoint(event);
         this.dispatchWheel(point.x, point.y, event);
+      },
+      // Stage H: clear hovers when pointer leaves canvas
+      mouseleave: () => {
+        this._clearAllHovers();
       },
     };
 
@@ -2602,6 +2767,7 @@ class Scene {
     canvas.addEventListener('keydown', this._boundHandlers.keydown);
     canvas.addEventListener('keyup', this._boundHandlers.keyup);
     canvas.addEventListener('wheel', this._boundHandlers.wheel, { passive: false });
+    canvas.addEventListener('mouseleave', this._boundHandlers.mouseleave);
   }
 
   detachCanvas() {
@@ -2618,6 +2784,7 @@ class Scene {
     this.canvas.removeEventListener('keydown', this._boundHandlers.keydown);
     this.canvas.removeEventListener('keyup', this._boundHandlers.keyup);
     this.canvas.removeEventListener('wheel', this._boundHandlers.wheel);
+    this.canvas.removeEventListener('mouseleave', this._boundHandlers.mouseleave);
 
     this.canvas = null;
     this._boundHandlers = null;
@@ -2685,6 +2852,12 @@ class Scene {
     if (event.accepted) {
       this.renderer.markDirty();
     }
+
+    // Stage H: update HoverHandlers on every move (even if no press-handler accepted)
+    if (type === 'move') {
+      this._dispatchHover(sceneX, sceneY);
+    }
+
     return event;
   }
 
@@ -2809,18 +2982,38 @@ class Scene {
     return event;
   }
 
-  // Flickable: Wheel event dispatch
+  // Flickable / WheelHandler / PinchHandler: Wheel event dispatch
   dispatchWheel(sceneX, sceneY, originalEvent) {
     if (!(this.rootItem instanceof Item)) return null;
 
     const target = this.rootItem.hitTest(sceneX, sceneY);
     if (!target) return null;
 
-    // Walk up from target to find an item that accepts wheel events
+    // Walk up from target to find an item that accepts wheel events.
+    // Pass sceneX/sceneY so WheelHandler/PinchHandler can check containsPoint.
+    // Also scan each item's direct children for WheelHandler/PinchHandler
+    // instances that have no own bounds (i.e. are attached to the parent).
     let current = target;
     while (current instanceof Item) {
+      // First: check children for attached WheelHandler / PinchHandler
+      for (const child of current.childItems) {
+        if ((child instanceof WheelHandler || child instanceof PinchHandler) &&
+            typeof child.handleWheelEvent === 'function' &&
+            child !== target) {
+          const accepted = child.handleWheelEvent(originalEvent, sceneX, sceneY);
+          if (accepted) {
+            if (originalEvent && typeof originalEvent.preventDefault === 'function') {
+              originalEvent.preventDefault();
+            }
+            this.renderer.markDirty();
+            return child;
+          }
+        }
+      }
+
+      // Then: check the item itself (e.g. Flickable, or WheelHandler found by hitTest)
       if (typeof current.handleWheelEvent === 'function') {
-        const accepted = current.handleWheelEvent(originalEvent);
+        const accepted = current.handleWheelEvent(originalEvent, sceneX, sceneY);
         if (accepted) {
           if (originalEvent && typeof originalEvent.preventDefault === 'function') {
             originalEvent.preventDefault();
@@ -2833,6 +3026,43 @@ class Scene {
     }
 
     return null;
+  }
+
+  // Stage H: HoverHandler support
+
+  // Collect all HoverHandler instances depth-first
+  _collectHoverHandlers(item = this.rootItem, result = []) {
+    if (!(item instanceof Item)) return result;
+    if (item instanceof HoverHandler) result.push(item);
+    for (const child of item.childItems) {
+      this._collectHoverHandlers(child, result);
+    }
+    return result;
+  }
+
+  // Update hover state for all HoverHandlers in the scene
+  _dispatchHover(sceneX, sceneY) {
+    const handlers = this._collectHoverHandlers();
+    let dirty = false;
+    for (const h of handlers) {
+      const wasHovered = h.hovered;
+      h._updateHover(sceneX, sceneY);
+      if (h.hovered !== wasHovered) dirty = true;
+    }
+    if (dirty) this.renderer.markDirty();
+  }
+
+  // Clear all hover states (e.g. when pointer leaves canvas)
+  _clearAllHovers() {
+    const handlers = this._collectHoverHandlers();
+    let dirty = false;
+    for (const h of handlers) {
+      if (h.hovered) {
+        h._clearHover();
+        dirty = true;
+      }
+    }
+    if (dirty) this.renderer.markDirty();
   }
 }
 
@@ -6863,6 +7093,10 @@ const runtimeExports = {
   Keys,
   TapHandler,
   DragHandler,
+  // Stage H: pointer handler extensions
+  HoverHandler,
+  WheelHandler,
+  PinchHandler,
   // Stage D: controls MVP
   Theme,
   Button,
