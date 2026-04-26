@@ -1295,7 +1295,353 @@ test('ListView positionViewAtIndex scrolls to correct position', () => {
   lv.destroy();
 });
 
+// ---------------------------------------------------------------------------
+// ListView – currentIndex / currentItem / highlight
+// ---------------------------------------------------------------------------
 
+test('ListView currentIndex defaults to -1 and currentItem is null', () => {
+  const { ListView } = require('../src/runtime');
+  const lv = new ListView();
+  assert.equal(lv.currentIndex, -1);
+  assert.equal(lv.currentItem, null);
+  lv.destroy();
+});
+
+test('ListView setting currentIndex updates currentItem and highlight geometry', () => {
+  const { ListModel, ListView, Component, Item, Rectangle, Context } = require('../src/runtime');
+
+  const model = new ListModel();
+  for (let i = 0; i < 10; i++) model.append({ n: i });
+
+  const lv = new ListView();
+  lv.width = 200;
+  lv.height = 200;
+  lv._delegateHeight = 40;
+  lv.cacheBuffer = 0;
+  lv.setContext(new Context(null, {}));
+
+  const delegate = new Component(({ parent: p }) => {
+    const item = new Item({ parentItem: p });
+    item.height = 40;
+    return item;
+  });
+
+  const highlight = new Component(({ parent: p }) => {
+    const r = new Rectangle({ parentItem: p });
+    r.color = 'blue';
+    return r;
+  });
+
+  lv.model = model;
+  lv.delegate = delegate;
+  lv.highlight = highlight;
+
+  // Before setting currentIndex, highlight is hidden
+  assert.ok(lv.highlightItem, 'highlightItem should be created');
+  assert.equal(lv.highlightItem.visible, false, 'highlight should be hidden when currentIndex=-1');
+
+  // Set currentIndex to row 2
+  lv.currentIndex = 2;
+  assert.ok(lv.currentItem !== null, 'currentItem should be non-null');
+  assert.equal(lv.currentItem, lv.itemAt(2), 'currentItem should be itemAt(2)');
+  assert.equal(lv.highlightItem.visible, true, 'highlight should be visible');
+  assert.equal(lv.highlightItem.y, 2 * 40, 'highlight y should match item 2 position');
+  assert.equal(lv.highlightItem.height, 40, 'highlight height should match delegateHeight');
+
+  // Set currentIndex to row 5
+  lv.currentIndex = 5;
+  assert.equal(lv.highlightItem.y, 5 * 40, 'highlight y should match item 5 position');
+
+  lv.destroy();
+});
+
+test('ListView count mirrors model count', () => {
+  const { ListModel, ListView, Component, Item, Context } = require('../src/runtime');
+
+  const model = new ListModel();
+  for (let i = 0; i < 7; i++) model.append({ n: i });
+
+  const lv = new ListView();
+  lv.width = 200;
+  lv.height = 200;
+  lv._delegateHeight = 40;
+  lv.setContext(new Context(null, {}));
+
+  const delegate = new Component(({ parent: p }) => {
+    const item = new Item({ parentItem: p });
+    item.height = 40;
+    return item;
+  });
+
+  lv.model = model;
+  lv.delegate = delegate;
+
+  assert.equal(lv.count, 7, 'count should equal model count');
+
+  model.append({ n: 7 });
+  assert.equal(lv.count, 8, 'count should update when model grows');
+
+  lv.destroy();
+});
+
+// ---------------------------------------------------------------------------
+// ListView – header / footer
+// ---------------------------------------------------------------------------
+
+test('ListView header and footer affect contentHeight and item positions', () => {
+  const { ListModel, ListView, Component, Item, Context } = require('../src/runtime');
+
+  const model = new ListModel();
+  for (let i = 0; i < 5; i++) model.append({ n: i });
+
+  const lv = new ListView();
+  lv.width = 200;
+  lv.height = 400;
+  lv._delegateHeight = 40;
+  lv.cacheBuffer = 0;
+  lv.setContext(new Context(null, {}));
+
+  const delegate = new Component(({ parent: p }) => {
+    const item = new Item({ parentItem: p });
+    item.height = 40;
+    return item;
+  });
+
+  const header = new Component(({ parent: p }) => {
+    const item = new Item({ parentItem: p });
+    item.height = 60;
+    return item;
+  });
+
+  const footer = new Component(({ parent: p }) => {
+    const item = new Item({ parentItem: p });
+    item.height = 50;
+    return item;
+  });
+
+  lv.model = model;
+  lv.delegate = delegate;
+  lv.header = header;
+  lv.footer = footer;
+
+  // contentHeight = header(60) + 5*40(200) + footer(50) = 310
+  assert.equal(lv.contentHeight, 310, 'contentHeight should include header and footer');
+
+  // Delegate items should be offset by header height
+  assert.equal(lv.itemAt(0)?.y, 60, 'first item y should be after header (60)');
+  assert.equal(lv.itemAt(4)?.y, 60 + 4 * 40, 'last item y should be header + 4*rowH');
+
+  // Footer should be positioned after all delegates
+  assert.equal(lv._footerItem.y, 60 + 5 * 40, 'footer y should be after all delegates');
+
+  lv.destroy();
+});
+
+test('ListView positionViewAtIndex respects header height', () => {
+  const { ListModel, ListView, Component, Item, Context } = require('../src/runtime');
+
+  const model = new ListModel();
+  for (let i = 0; i < 20; i++) model.append({ n: i });
+
+  const lv = new ListView();
+  lv.width = 200;
+  lv.height = 200;
+  lv._delegateHeight = 40;
+  lv.cacheBuffer = 0;
+  lv.setContext(new Context(null, {}));
+
+  const delegate = new Component(({ parent: p }) => {
+    const item = new Item({ parentItem: p });
+    item.height = 40;
+    return item;
+  });
+
+  const header = new Component(({ parent: p }) => {
+    const item = new Item({ parentItem: p });
+    item.height = 80;
+    return item;
+  });
+
+  lv.model = model;
+  lv.delegate = delegate;
+  lv.header = header;
+
+  // positionViewAtIndex(5) should scroll to header(80) + 5*40 = 280
+  lv.positionViewAtIndex(5);
+  assert.equal(lv.contentY, 280, 'positionViewAtIndex should account for header height');
+
+  lv.destroy();
+});
+
+// ---------------------------------------------------------------------------
+// ListView – keyboard navigation
+// ---------------------------------------------------------------------------
+
+test('ListView keyboard navigation ArrowDown/Up changes currentIndex', () => {
+  const { ListModel, ListView, Component, Item, Context } = require('../src/runtime');
+
+  const model = new ListModel();
+  for (let i = 0; i < 5; i++) model.append({ n: i });
+
+  const lv = new ListView();
+  lv.width = 200;
+  lv.height = 200;
+  lv._delegateHeight = 40;
+  lv.cacheBuffer = 0;
+  lv.setContext(new Context(null, {}));
+
+  const delegate = new Component(({ parent: p }) => {
+    const item = new Item({ parentItem: p });
+    item.height = 40;
+    return item;
+  });
+
+  lv.model = model;
+  lv.delegate = delegate;
+
+  // Start at -1
+  assert.equal(lv.currentIndex, -1);
+
+  // ArrowDown from -1 → 0
+  lv._handleListViewKey({ key: 'ArrowDown', accepted: false });
+  assert.equal(lv.currentIndex, 0, 'ArrowDown from -1 should go to 0');
+
+  // ArrowDown from 0 → 1
+  lv._handleListViewKey({ key: 'ArrowDown', accepted: false });
+  assert.equal(lv.currentIndex, 1, 'ArrowDown should increment currentIndex');
+
+  // ArrowUp from 1 → 0
+  lv._handleListViewKey({ key: 'ArrowUp', accepted: false });
+  assert.equal(lv.currentIndex, 0, 'ArrowUp should decrement currentIndex');
+
+  // ArrowUp from 0 → 0 (already at min)
+  lv._handleListViewKey({ key: 'ArrowUp', accepted: false });
+  assert.equal(lv.currentIndex, 0, 'ArrowUp at index 0 should stay at 0');
+
+  // Navigate to last item
+  lv.currentIndex = 4;
+  lv._handleListViewKey({ key: 'ArrowDown', accepted: false });
+  assert.equal(lv.currentIndex, 4, 'ArrowDown at last index should stay at last');
+
+  lv.destroy();
+});
+
+test('ListView keyboard PageDown/PageUp changes currentIndex by viewHeight', () => {
+  const { ListModel, ListView, Component, Item, Context } = require('../src/runtime');
+
+  const model = new ListModel();
+  for (let i = 0; i < 20; i++) model.append({ n: i });
+
+  const lv = new ListView();
+  lv.width = 200;
+  lv.height = 200;  // 5 rows visible
+  lv._delegateHeight = 40;
+  lv.cacheBuffer = 0;
+  lv.setContext(new Context(null, {}));
+
+  const delegate = new Component(({ parent: p }) => {
+    const item = new Item({ parentItem: p });
+    item.height = 40;
+    return item;
+  });
+
+  lv.model = model;
+  lv.delegate = delegate;
+
+  lv.currentIndex = 0;
+
+  // PageDown: 200/40 = 5 rows
+  lv._handleListViewKey({ key: 'PageDown', accepted: false });
+  assert.equal(lv.currentIndex, 5, 'PageDown should advance by viewHeight/rowH');
+
+  lv._handleListViewKey({ key: 'PageUp', accepted: false });
+  assert.equal(lv.currentIndex, 0, 'PageUp should retreat by viewHeight/rowH');
+
+  lv.destroy();
+});
+
+// ---------------------------------------------------------------------------
+// ListView – reuse pool
+// ---------------------------------------------------------------------------
+
+test('ListView reuse pool reduces creations when scrolling', () => {
+  const { ListModel, ListView, Component, Item, Context } = require('../src/runtime');
+
+  const model = new ListModel();
+  for (let i = 0; i < 30; i++) model.append({ n: i });
+
+  const lv = new ListView();
+  lv.width = 200;
+  lv.height = 200;
+  lv._delegateHeight = 40;
+  lv.cacheBuffer = 0;
+  lv.setContext(new Context(null, {}));
+
+  let creationCount = 0;
+  const delegate = new Component(({ parent: p }) => {
+    creationCount++;
+    const item = new Item({ parentItem: p });
+    item.height = 40;
+    return item;
+  });
+
+  lv.model = model;
+  lv.delegate = delegate;
+
+  const initialCreations = creationCount;
+  assert.ok(initialCreations > 0, 'should have created some items initially');
+
+  // Scroll to bottom
+  lv.contentY = 800; // rows 20+
+  const afterScrollDown = creationCount;
+
+  // Scroll back to top
+  lv.contentY = 0;
+  const afterScrollBack = creationCount;
+
+  // If pool is working, scrolling back to top should reuse pooled items
+  // and create fewer new items than if everything was destroyed
+  assert.ok(
+    afterScrollBack - afterScrollDown < initialCreations,
+    `Reuse pool should reduce creations on scroll-back (initial: ${initialCreations}, ` +
+    `after scroll down: ${afterScrollDown}, after scroll back: ${afterScrollBack})`,
+  );
+
+  lv.destroy();
+});
+
+test('ListView atYBegin and atYEnd flags', () => {
+  const { ListModel, ListView, Component, Item, Context } = require('../src/runtime');
+
+  const model = new ListModel();
+  for (let i = 0; i < 20; i++) model.append({ n: i });
+
+  const lv = new ListView();
+  lv.width = 200;
+  lv.height = 200;
+  lv._delegateHeight = 40;
+  lv.cacheBuffer = 0;
+  lv.setContext(new Context(null, {}));
+
+  const delegate = new Component(({ parent: p }) => {
+    const item = new Item({ parentItem: p });
+    item.height = 40;
+    return item;
+  });
+
+  lv.model = model;
+  lv.delegate = delegate;
+
+  assert.equal(lv.atYBegin, true, 'atYBegin should be true at start');
+  assert.equal(lv.atYEnd, false, 'atYEnd should be false at start');
+
+  // Scroll to bottom: contentHeight=800, viewH=200, maxY=600
+  lv.contentY = 600;
+  assert.equal(lv.atYBegin, false, 'atYBegin should be false after scroll');
+  assert.equal(lv.atYEnd, true, 'atYEnd should be true at bottom');
+
+  lv.destroy();
+});
 
 test('Item has focus, activeFocus, focusable, activeFocusOnTab, focusScope properties', () => {
   const { Item } = require('../src/runtime');

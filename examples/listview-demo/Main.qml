@@ -3,7 +3,7 @@ import QtQuick 2.15
 Item {
     id: root
     width: 480
-    height: 600
+    height: 640
 
     // -----------------------------------------------------------------------
     // Model
@@ -31,56 +31,106 @@ Item {
         height: 50
         color: "#3f51b5"
 
-        Item {
-            anchors.fill: titleBar
-            Item {
-                x: 16
-                y: 15
-                width: titleBar.width - 32
-                height: 20
-            }
+        Text {
+            x: 16
+            y: 14
+            text: "Contacts  —  current: " + (listView.currentIndex >= 0 ? listView.currentIndex : "none")
+            color: "#ffffff"
+            font.pixelSize: 16
         }
     }
 
     // -----------------------------------------------------------------------
-    // ListView
+    // ListView with header, footer, highlight and keyboard navigation
     // -----------------------------------------------------------------------
     ListView {
         id: listView
         x: 0
-        y: 60
+        y: 50
         width: root.width
-        height: root.height - 120
+        height: root.height - 110
 
+        focus: true
         model: contactsModel
 
+        // ----- header -------------------------------------------------------
+        header: Rectangle {
+            width: listView.width
+            height: 36
+            color: "#e8eaf6"
+
+            Text {
+                x: 16; y: 9
+                text: listView.count + " contacts"
+                color: "#3f51b5"
+                font.pixelSize: 13
+            }
+        }
+
+        // ----- footer -------------------------------------------------------
+        footer: Rectangle {
+            width: listView.width
+            height: 32
+            color: "#e8eaf6"
+
+            Text {
+                x: 16; y: 8
+                text: listView.atYEnd ? "— end of list —" : "scroll for more…"
+                color: "#888888"
+                font.pixelSize: 12
+            }
+        }
+
+        // ----- highlight (rendered behind delegates) -----------------------
+        highlight: Rectangle {
+            width: listView.width
+            color: "#c5cae9"
+        }
+        highlightFollowsCurrentItem: true
+
+        // ----- delegate -----------------------------------------------------
         delegate: Rectangle {
             width: listView.width
             height: 56
-            color: index % 2 === 0 ? "#ffffff" : "#f5f5f5"
+            color: "transparent"
             borderColor: "#e0e0e0"
             borderWidth: 1
 
+            // Avatar circle
             Rectangle {
                 x: 12
                 y: 8
                 width: 40
                 height: 40
-                color: "#3f51b5"
+                color: listView.currentIndex === index ? "#3f51b5" : "#9fa8da"
                 radius: 20
+
+                Text {
+                    x: 12; y: 10
+                    text: name.charAt(0)
+                    color: "#ffffff"
+                    font.pixelSize: 16
+                }
             }
 
-            Item {
-                x: 64
-                y: 10
-                width: listView.width - 76
-                height: 36
+            // Name + city
+            Text {
+                x: 64; y: 10
+                text: name
+                color: "#1a1a2e"
+                font.pixelSize: 15
+            }
+            Text {
+                x: 64; y: 30
+                text: city + ", age " + age
+                color: "#666666"
+                font.pixelSize: 12
             }
 
             MouseArea {
                 anchors.fill: parent
                 onClicked: {
-                    contactsModel.remove(index)
+                    listView.currentIndex = index
                 }
             }
         }
@@ -104,16 +154,18 @@ Item {
             id: addButton
             x: 16
             y: 10
-            width: 120
+            width: 100
             height: 40
             color: "#4caf50"
             radius: 4
+
+            Text { x: 28; y: 12; text: "Add"; color: "#fff"; font.pixelSize: 13 }
 
             MouseArea {
                 anchors.fill: parent
                 onClicked: {
                     contactsModel.append({
-                        name: "New Contact",
+                        name: "New",
                         city: "Unknown",
                         age: 0
                     })
@@ -121,20 +173,24 @@ Item {
             }
         }
 
-        // "Clear" button
+        // "Remove" button
         Rectangle {
-            id: clearButton
-            x: 152
+            id: removeButton
+            x: 124
             y: 10
-            width: 120
+            width: 100
             height: 40
             color: "#f44336"
             radius: 4
 
+            Text { x: 18; y: 12; text: "Remove"; color: "#fff"; font.pixelSize: 13 }
+
             MouseArea {
                 anchors.fill: parent
                 onClicked: {
-                    contactsModel.clear()
+                    if (listView.currentIndex >= 0) {
+                        contactsModel.remove(listView.currentIndex)
+                    }
                 }
             }
         }
@@ -142,12 +198,14 @@ Item {
         // "Reset" button
         Rectangle {
             id: resetButton
-            x: 288
+            x: 232
             y: 10
-            width: 120
+            width: 100
             height: 40
             color: "#ff9800"
             radius: 4
+
+            Text { x: 22; y: 12; text: "Reset"; color: "#fff"; font.pixelSize: 13 }
 
             MouseArea {
                 anchors.fill: parent
@@ -156,6 +214,47 @@ Item {
                     contactsModel.append({ name: "Alice", city: "Berlin", age: 30 })
                     contactsModel.append({ name: "Bob",   city: "Paris",  age: 25 })
                     contactsModel.append({ name: "Carol", city: "London", age: 35 })
+                    listView.currentIndex = 0
+                }
+            }
+        }
+
+        // "▲ Prev" button
+        Rectangle {
+            x: 340
+            y: 10
+            width: 60
+            height: 40
+            color: "#607d8b"
+            radius: 4
+
+            Text { x: 12; y: 12; text: "▲ Prev"; color: "#fff"; font.pixelSize: 12 }
+
+            MouseArea {
+                anchors.fill: parent
+                onClicked: {
+                    if (listView.currentIndex > 0)
+                        listView.currentIndex = listView.currentIndex - 1
+                }
+            }
+        }
+
+        // "▼ Next" button
+        Rectangle {
+            x: 408
+            y: 10
+            width: 60
+            height: 40
+            color: "#607d8b"
+            radius: 4
+
+            Text { x: 12; y: 12; text: "▼ Next"; color: "#fff"; font.pixelSize: 12 }
+
+            MouseArea {
+                anchors.fill: parent
+                onClicked: {
+                    if (listView.currentIndex < listView.count - 1)
+                        listView.currentIndex = listView.currentIndex + 1
                 }
             }
         }
