@@ -1575,6 +1575,7 @@ test('ListView reuse pool reduces creations when scrolling', () => {
   lv.height = 200;
   lv._delegateHeight = 40;
   lv.cacheBuffer = 0;
+  lv.reuseItems = true;
   lv.setContext(new Context(null, {}));
 
   let creationCount = 0;
@@ -4579,4 +4580,187 @@ test('Popup containsScenePoint returns correct values', () => {
   assert.equal(popup.containsScenePoint(50,  50),  false, 'outside should return false');
   assert.equal(popup.containsScenePoint(300, 300), false, 'upper bound is exclusive');
   assert.equal(popup.containsScenePoint(299, 299), true,  'just inside upper bound should return true');
+});
+
+// ---------------------------------------------------------------------------
+// ListView – delegate context parity (model.index / modelData)
+// ---------------------------------------------------------------------------
+
+test('ListView delegate context exposes index, model.index and modelData for numeric model', () => {
+  const { ListView, Component, Item, Context } = require('../src/runtime');
+
+  const lv = new ListView();
+  lv.width = 200;
+  lv.height = 200;
+  lv._delegateHeight = 40;
+  lv.cacheBuffer = 0;
+  lv.setContext(new Context(null, {}));
+
+  const captured = [];
+  const delegate = new Component(({ parent: p, context }) => {
+    captured.push({
+      index:      context.lookup('index'),
+      modelIndex: context.lookup('model') && context.lookup('model').index,
+      modelData:  context.lookup('modelData'),
+    });
+    const item = new Item({ parentItem: p });
+    item.height = 40;
+    return item;
+  });
+
+  lv.model = 5;
+  lv.delegate = delegate;
+
+  assert.ok(captured.length > 0, 'delegate should have been called');
+  for (const c of captured) {
+    assert.equal(typeof c.index, 'number', 'index should be a number');
+    assert.equal(c.modelIndex, c.index, 'model.index should equal index');
+    assert.equal(c.modelData, c.index, 'modelData should equal index for numeric model');
+  }
+
+  lv.destroy();
+});
+
+test('ListView delegate context exposes model.index and role fields for ListModel', () => {
+  const { ListModel, ListView, Component, Item, Context } = require('../src/runtime');
+
+  const model = new ListModel();
+  model.append({ name: 'Alice' });
+  model.append({ name: 'Bob' });
+
+  const lv = new ListView();
+  lv.width = 200;
+  lv.height = 200;
+  lv._delegateHeight = 40;
+  lv.cacheBuffer = 0;
+  lv.setContext(new Context(null, {}));
+
+  const captured = [];
+  const delegate = new Component(({ parent: p, context }) => {
+    const m = context.lookup('model');
+    captured.push({
+      index:      context.lookup('index'),
+      modelIndex: m && m.index,
+      name:       m && m.name,
+      modelData:  context.lookup('modelData'),
+    });
+    const item = new Item({ parentItem: p });
+    item.height = 40;
+    return item;
+  });
+
+  lv.model = model;
+  lv.delegate = delegate;
+
+  assert.equal(captured.length, 2);
+  assert.equal(captured[0].index, 0);
+  assert.equal(captured[0].modelIndex, 0, 'model.index should be 0 for first item');
+  assert.equal(captured[0].name, 'Alice', 'model.name should be Alice');
+  assert.deepEqual(captured[0].modelData, { name: 'Alice' }, 'modelData should be the row object');
+  assert.equal(captured[1].modelIndex, 1, 'model.index should be 1 for second item');
+
+  lv.destroy();
+});
+
+// ---------------------------------------------------------------------------
+// ListView – reuseItems property
+// ---------------------------------------------------------------------------
+
+test('ListView reuseItems defaults to false', () => {
+  const { ListView } = require('../src/runtime');
+  const lv = new ListView();
+  assert.equal(lv.reuseItems, false);
+  lv.destroy();
+});
+
+test('ListView reuseItems=false does not pool items; creation count grows on scroll', () => {
+  const { ListModel, ListView, Component, Item, Context } = require('../src/runtime');
+
+  const model = new ListModel();
+  for (let i = 0; i < 30; i++) model.append({ n: i });
+
+  const lv = new ListView();
+  lv.width = 200;
+  lv.height = 200;
+  lv._delegateHeight = 40;
+  lv.cacheBuffer = 0;
+  lv.reuseItems = false;
+  lv.setContext(new Context(null, {}));
+
+  let creationCount = 0;
+  const delegate = new Component(({ parent: p }) => {
+    creationCount++;
+    const item = new Item({ parentItem: p });
+    item.height = 40;
+    return item;
+  });
+
+  lv.model = model;
+  lv.delegate = delegate;
+
+  const initialCreations = creationCount;
+  assert.ok(initialCreations > 0, 'should have created items initially');
+
+  // Scroll down – items going out of view must be destroyed, not pooled
+  lv.contentY = 800;
+  assert.equal(lv._reusePool.length, 0, 'pool must be empty when reuseItems=false');
+
+  // Scroll back – all new items must be freshly created
+  const countBeforeScrollBack = creationCount;
+  lv.contentY = 0;
+  assert.equal(lv._reusePool.length, 0, 'pool must remain empty after scroll-back');
+  assert.ok(
+    creationCount > countBeforeScrollBack,
+    'new items must be created on scroll-back when reuseItems=false',
+  );
+
+  lv.destroy();
+});
+
+test('ListView reuseItems=true pools items and fires pooled/reused signals', () => {
+  const { ListModel, ListView, Component, Item, Context } = require('../src/runtime');
+
+  const model = new ListModel();
+  for (let i = 0; i < 30; i++) model.append({ n: i });
+
+  const lv = new ListView();
+  lv.width = 200;
+  lv.height = 200;
+  lv._delegateHeight = 40;
+  lv.cacheBuffer = 0;
+  lv.reuseItems = true;
+  lv.setContext(new Context(null, {}));
+
+  const pooledEvents = [];
+  const reusedEvents = [];
+  lv.connect('pooled', (item, index) => pooledEvents.push({ item, index }));
+  lv.connect('reused', (item, index) => reusedEvents.push({ item, index }));
+
+  let creationCount = 0;
+  const delegate = new Component(({ parent: p }) => {
+    creationCount++;
+    const item = new Item({ parentItem: p });
+    item.height = 40;
+    return item;
+  });
+
+  lv.model = model;
+  lv.delegate = delegate;
+
+  const initialCreations = creationCount;
+  assert.ok(initialCreations > 0, 'should create items on load');
+
+  // Scroll down – items going offscreen should be pooled → pooled signal fires
+  // (pooled items may be consumed immediately to fill the new visible range,
+  //  so we check events rather than pool size)
+  lv.contentY = 800;
+  assert.ok(pooledEvents.length > 0, 'pooled signal should have fired on scroll down');
+  assert.ok(reusedEvents.length > 0, 'reused signal should fire when pool items fill new range');
+
+  // Validate reused event carries correct new index
+  for (const ev of reusedEvents) {
+    assert.equal(typeof ev.index, 'number', 'reused event index should be a number');
+  }
+
+  lv.destroy();
 });

@@ -42,6 +42,9 @@ Item {
 
     // -----------------------------------------------------------------------
     // ListView with header, footer, highlight and keyboard navigation
+    // reuseItems: toggled by the button in the action bar.
+    // onPooled / onReused: log to console to verify delegate reuse lifecycle.
+    // Delegate text shows: index / model.index / modelData.name
     // -----------------------------------------------------------------------
     ListView {
         id: listView
@@ -53,6 +56,17 @@ Item {
         focus: true
         model: contactsModel
 
+        // reuseItems=false by default (matches desktop QtQuick).
+        // Toggle with the "Reuse: ON/OFF" button below.
+        reuseItems: false
+
+        onPooled: function(item, index) {
+            console.log("pooled  item at index", index)
+        }
+        onReused: function(item, index) {
+            console.log("reused  item now at index", index)
+        }
+
         // ----- header -------------------------------------------------------
         header: Rectangle {
             width: listView.width
@@ -61,7 +75,7 @@ Item {
 
             Text {
                 x: 16; y: 9
-                text: listView.count + " contacts"
+                text: listView.count + " contacts  |  reuseItems: " + listView.reuseItems
                 color: "#3f51b5"
                 font.pixelSize: 13
             }
@@ -120,9 +134,10 @@ Item {
                 color: "#1a1a2e"
                 font.pixelSize: 15
             }
+            // Shows index / model.index / modelData.name for context-parity verification
             Text {
                 x: 64; y: 30
-                text: city + ", age " + age
+                text: city + ", age " + age + "  [" + index + " / " + model.index + " / " + modelData.name + "]"
                 color: "#666666"
                 font.pixelSize: 12
             }
@@ -154,12 +169,12 @@ Item {
             id: addButton
             x: 16
             y: 10
-            width: 100
+            width: 80
             height: 40
             color: "#4caf50"
             radius: 4
 
-            Text { x: 28; y: 12; text: "Add"; color: "#fff"; font.pixelSize: 13 }
+            Text { x: 22; y: 12; text: "Add"; color: "#fff"; font.pixelSize: 13 }
 
             MouseArea {
                 anchors.fill: parent
@@ -175,15 +190,14 @@ Item {
 
         // "Remove" button
         Rectangle {
-            id: removeButton
-            x: 124
+            x: 104
             y: 10
-            width: 100
+            width: 80
             height: 40
             color: "#f44336"
             radius: 4
 
-            Text { x: 18; y: 12; text: "Remove"; color: "#fff"; font.pixelSize: 13 }
+            Text { x: 12; y: 12; text: "Remove"; color: "#fff"; font.pixelSize: 13 }
 
             MouseArea {
                 anchors.fill: parent
@@ -197,15 +211,14 @@ Item {
 
         // "Reset" button
         Rectangle {
-            id: resetButton
-            x: 232
+            x: 192
             y: 10
-            width: 100
+            width: 80
             height: 40
             color: "#ff9800"
             radius: 4
 
-            Text { x: 22; y: 12; text: "Reset"; color: "#fff"; font.pixelSize: 13 }
+            Text { x: 18; y: 12; text: "Reset"; color: "#fff"; font.pixelSize: 13 }
 
             MouseArea {
                 anchors.fill: parent
@@ -219,42 +232,48 @@ Item {
             }
         }
 
-        // "▲ Prev" button
+        // "Reuse: ON/OFF" toggle button
         Rectangle {
-            x: 340
+            x: 280
             y: 10
-            width: 60
+            width: 90
             height: 40
-            color: "#607d8b"
+            color: listView.reuseItems ? "#607d8b" : "#9e9e9e"
             radius: 4
 
-            Text { x: 12; y: 12; text: "▲ Prev"; color: "#fff"; font.pixelSize: 12 }
+            Text {
+                x: 8; y: 12
+                text: "Reuse: " + (listView.reuseItems ? "ON" : "OFF")
+                color: "#fff"
+                font.pixelSize: 12
+            }
 
             MouseArea {
                 anchors.fill: parent
                 onClicked: {
-                    if (listView.currentIndex > 0)
-                        listView.currentIndex = listView.currentIndex - 1
+                    listView.reuseItems = !listView.reuseItems
                 }
             }
         }
 
         // "▼ Next" button
         Rectangle {
-            x: 408
+            x: 378
             y: 10
-            width: 60
+            width: 88
             height: 40
             color: "#607d8b"
             radius: 4
 
-            Text { x: 12; y: 12; text: "▼ Next"; color: "#fff"; font.pixelSize: 12 }
+            Text { x: 8; y: 12; text: "▲▼ Nav"; color: "#fff"; font.pixelSize: 12 }
 
             MouseArea {
                 anchors.fill: parent
                 onClicked: {
                     if (listView.currentIndex < listView.count - 1)
                         listView.currentIndex = listView.currentIndex + 1
+                    else if (listView.currentIndex > 0)
+                        listView.currentIndex = listView.currentIndex - 1
                 }
             }
         }
