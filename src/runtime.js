@@ -4588,7 +4588,9 @@ class Positioner extends Item {
 
     const disconnectors = [];
     const schedule = () => this._scheduleLayout();
-    const watchedProps = ['x', 'y', 'width', 'height', 'implicitWidth', 'implicitHeight', 'visible'];
+    // Watch size and visibility changes; deliberately exclude x/y since the
+    // positioner itself writes those and watching them would cause loops.
+    const watchedProps = ['width', 'height', 'implicitWidth', 'implicitHeight', 'visible'];
     for (const prop of watchedProps) {
       const signal = child[`${prop}Changed`];
       if (signal && typeof signal.connect === 'function') {
@@ -4641,9 +4643,16 @@ class Positioner extends Item {
     return this._childItems.filter((c) => c.visible !== false);
   }
 
-  /** Effective size of a child: prefer explicit width/height, then implicit. */
-  static _childW(child) { return child.width || child.implicitWidth || 0; }
-  static _childH(child) { return child.height || child.implicitHeight || 0; }
+  /** Effective size of a child: use explicit width/height when > 0, otherwise fall back to implicit. */
+  static _childW(child) {
+    const w = child.width;
+    return w > 0 ? w : (child.implicitWidth || 0);
+  }
+
+  static _childH(child) {
+    const h = child.height;
+    return h > 0 ? h : (child.implicitHeight || 0);
+  }
 }
 
 // ---------------------------------------------------------------------------

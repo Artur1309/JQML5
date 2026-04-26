@@ -69,7 +69,6 @@ const RUNTIME_TYPES = [
   ['Flickable', { kind: 'runtime', runtimeExport: 'Flickable', category: 'quick-model', isItem: true }],
   ['ListView', { kind: 'runtime', runtimeExport: 'ListView', category: 'quick-model', isItem: true }],
   // PR2: layout positioners
-  ['Positioner', { kind: 'runtime', runtimeExport: 'Positioner', category: 'quick-layout', isItem: true }],
   ['Row', { kind: 'runtime', runtimeExport: 'Row', category: 'quick-layout', isItem: true }],
   ['Column', { kind: 'runtime', runtimeExport: 'Column', category: 'quick-layout', isItem: true }],
   ['Flow', { kind: 'runtime', runtimeExport: 'Flow', category: 'quick-layout', isItem: true }],
