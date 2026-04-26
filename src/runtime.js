@@ -3549,9 +3549,23 @@ function _modelRowData(model, index) {
 }
 
 function _buildDelegateContext(parentContext, model, index, rowData) {
+  // Build a model proxy object that exposes model.index (and role fields when
+  // rowData is an object), matching desktop QtQuick delegate context semantics.
+  const modelObject = { index };
+  if (rowData !== null && typeof rowData === 'object') {
+    for (const key of Object.keys(rowData)) {
+      if (key !== '__proto__' && key !== 'constructor' && key !== 'prototype') {
+        modelObject[key] = rowData[key];
+      }
+    }
+  } else {
+    // For simple models (numeric / primitive array items), mirror modelData
+    modelObject.modelData = rowData;
+  }
+
   const contextValues = {
     index,
-    model,
+    model: modelObject,
     modelData: rowData,
   };
   if (rowData !== null && typeof rowData === 'object') {
@@ -4256,6 +4270,9 @@ class ListView extends Flickable {
     this._maxPoolSize = 20;
 
     this.defineProperty('model', null);
+    // reuseItems controls whether offscreen delegates are pooled for reuse
+    // (false by default, matching desktop QtQuick behaviour).
+    this.defineProperty('reuseItems', false);
     this.defineProperty('delegate', null);
     this.defineProperty('spacing', 0);
     this.defineProperty('cacheBuffer', 40);  // extra pixels above/below to pre-create
@@ -4280,6 +4297,10 @@ class ListView extends Flickable {
 
     // ListView is focusable so it can receive keyboard events
     this.focusable = true;
+
+    // Delegate reuse signals (QtQuick parity)
+    this.defineSignal('pooled');   // pooled(item, index) – item moved into pool
+    this.defineSignal('reused');   // reused(item, index) – item taken from pool and re-bound
 
     // contentY / contentHeight are inherited from Flickable.
     // Re-connect virtualization to the inherited signal:
@@ -4466,8 +4487,9 @@ class ListView extends Flickable {
     for (let i = 0; i < this._delegateItems.length; i++) {
       const item = this._delegateItems[i];
       if (item && (i < firstVisible || i > lastVisible)) {
-        if (this._reusePool.length < this._maxPoolSize) {
+        if (this.reuseItems && this._reusePool.length < this._maxPoolSize) {
           item.visible = false;
+          this.pooled.emit(item, i);
           this._reusePool.push(item);
         } else {
           item.destroy();
@@ -4542,6 +4564,7 @@ class ListView extends Flickable {
       item.setContext(newContext);
       this._reevaluateBindings(item);
       item.visible = true;
+      this.reused.emit(item, index);
       return item;
     }
     return this._createDelegateAt(index);
