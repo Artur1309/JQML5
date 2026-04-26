@@ -1233,6 +1233,15 @@ class Item extends QtObject {
   _isFocusableByTab() {
     return this.enabled && this.visible && (this.activeFocusOnTab || this.focusable);
   }
+
+  /**
+   * Returns a content scroll offset {x, y} that CanvasRenderer applies as a
+   * negative translate before drawing this item's children.  The default
+   * implementation returns null (no offset).  Flickable overrides this.
+   */
+  _getContentOffset() {
+    return null;
+  }
 }
 
 class Component {
@@ -2370,6 +2379,13 @@ class CanvasRenderer {
       item.draw(context);
     }
 
+    // Flickable (and similar) may request a content scroll offset so that
+    // their children are rendered shifted by -(contentX, contentY).
+    const contentOffset = item._getContentOffset();
+    if (contentOffset) {
+      context.translate(-contentOffset.x, -contentOffset.y);
+    }
+
     for (const child of item._sortedChildItemsAscending()) {
       this._drawItem(child, opacity);
     }
@@ -2410,6 +2426,10 @@ class CanvasRenderer {
       const savedCtx = this.context;
       this.context = offCtx;
       if (typeof item.draw === 'function') item.draw(offCtx);
+      const contentOffsetLayer = item._getContentOffset();
+      if (contentOffsetLayer) {
+        offCtx.translate(-contentOffsetLayer.x, -contentOffsetLayer.y);
+      }
       for (const child of item._sortedChildItemsAscending()) {
         this._drawItem(child, 1);
       }
@@ -2512,6 +2532,11 @@ class Scene {
       keyup: (event) => {
         this.dispatchKey('released', event);
       },
+      // Flickable: wheel events
+      wheel: (event) => {
+        const point = toScenePoint(event);
+        this.dispatchWheel(point.x, point.y, event);
+      },
     };
 
     canvas.addEventListener('mousedown', this._boundHandlers.mousedown);
@@ -2520,6 +2545,7 @@ class Scene {
     canvas.addEventListener('click', this._boundHandlers.click);
     canvas.addEventListener('keydown', this._boundHandlers.keydown);
     canvas.addEventListener('keyup', this._boundHandlers.keyup);
+    canvas.addEventListener('wheel', this._boundHandlers.wheel, { passive: false });
   }
 
   detachCanvas() {
@@ -2535,6 +2561,7 @@ class Scene {
     this.canvas.removeEventListener('click', this._boundHandlers.click);
     this.canvas.removeEventListener('keydown', this._boundHandlers.keydown);
     this.canvas.removeEventListener('keyup', this._boundHandlers.keyup);
+    this.canvas.removeEventListener('wheel', this._boundHandlers.wheel);
 
     this.canvas = null;
     this._boundHandlers = null;
@@ -2724,6 +2751,32 @@ class Scene {
       this.renderer.markDirty();
     }
     return event;
+  }
+
+  // Flickable: Wheel event dispatch
+  dispatchWheel(sceneX, sceneY, originalEvent) {
+    if (!(this.rootItem instanceof Item)) return null;
+
+    const target = this.rootItem.hitTest(sceneX, sceneY);
+    if (!target) return null;
+
+    // Walk up from target to find an item that accepts wheel events
+    let current = target;
+    while (current instanceof Item) {
+      if (typeof current.handleWheelEvent === 'function') {
+        const accepted = current.handleWheelEvent(originalEvent);
+        if (accepted) {
+          if (originalEvent && typeof originalEvent.preventDefault === 'function') {
+            originalEvent.preventDefault();
+          }
+          this.renderer.markDirty();
+          return current;
+        }
+      }
+      current = current.parentItem;
+    }
+
+    return null;
   }
 }
 
@@ -3190,10 +3243,528 @@ class Repeater extends Item {
 }
 
 // ---------------------------------------------------------------------------
-// Stage B: ListView
+// Flickable – QtQuick-like scrollable viewport
 // ---------------------------------------------------------------------------
 
-class ListView extends Item {
+class Flickable extends Item {
+  constructor(options = {}) {
+    super(options);
+
+    // --- Scrollable content dimensions ---
+    this.defineProperty('contentX', options.contentX ?? 0);
+    this.defineProperty('contentY', options.contentY ?? 0);
+    this.defineProperty('contentWidth', options.contentWidth ?? 0);
+    this.defineProperty('contentHeight', options.contentHeight ?? 0);
+
+    // --- Behavior ---
+    this.defineProperty('interactive', options.interactive ?? true);
+    // 'HorizontalFlick' | 'VerticalFlick' | 'HorizontalAndVerticalFlick'
+    this.defineProperty('flickableDirection', options.flickableDirection ?? 'VerticalFlick');
+    // 'StopAtBounds' | 'DragOverBounds' | 'OvershootBounds'
+    this.defineProperty('boundsBehavior', options.boundsBehavior ?? 'OvershootBounds');
+    this.defineProperty('pressDelay', options.pressDelay ?? 0);
+
+    // --- Read-only state (use _setPropertyValue internally) ---
+    this.defineProperty('moving', false, { readOnly: true });
+    this.defineProperty('dragging', false, { readOnly: true });
+    this.defineProperty('flicking', false, { readOnly: true });
+
+    // --- Velocity (read-only) ---
+    this.defineProperty('velocity', { x: 0, y: 0 }, { readOnly: true });
+    this.defineProperty('horizontalVelocity', 0, { readOnly: true });
+    this.defineProperty('verticalVelocity', 0, { readOnly: true });
+
+    // --- Flick parameters ---
+    this.defineProperty('maximumFlickVelocity', options.maximumFlickVelocity ?? 2500);
+    this.defineProperty('flickDeceleration', options.flickDeceleration ?? 1500);
+
+    // --- Margins ---
+    this.defineProperty('topMargin', options.topMargin ?? 0);
+    this.defineProperty('bottomMargin', options.bottomMargin ?? 0);
+    this.defineProperty('leftMargin', options.leftMargin ?? 0);
+    this.defineProperty('rightMargin', options.rightMargin ?? 0);
+
+    // --- Signals ---
+    this.defineSignal('movementStarted');
+    this.defineSignal('movementEnded');
+    this.defineSignal('flickStarted');
+    this.defineSignal('flickEnded');
+
+    // --- Internal drag state ---
+    this._dragActive = false;
+    this._dragStartSceneX = 0;
+    this._dragStartSceneY = 0;
+    this._dragStartContentX = 0;
+    this._dragStartContentY = 0;
+    this._velocityPoints = [];   // [{ t, x, y }, ...]
+
+    // --- Internal flick/rebound state ---
+    this._flickVX = 0;
+    this._flickVY = 0;
+    this._flickingH = false;
+    this._flickingV = false;
+    this._reboundX = false;
+    this._reboundY = false;
+
+    // Ticker wrapper: _globalTicker calls _tick(dt) on registered objects
+    this._flickTickerObj = { _tick: (dt) => this._onFlickTick(dt) };
+    this._tickerActive = false;
+  }
+
+  // -----------------------------------------------------------------------
+  // Rendering: tell CanvasRenderer to apply -contentX/-contentY before
+  // drawing children.
+  // -----------------------------------------------------------------------
+
+  _getContentOffset() {
+    const x = this.contentX || 0;
+    const y = this.contentY || 0;
+    return (x !== 0 || y !== 0) ? { x, y } : null;
+  }
+
+  // -----------------------------------------------------------------------
+  // Hit testing: children are in logical content space, so adjust the scene
+  // coordinates by the content offset before forwarding to children.
+  // -----------------------------------------------------------------------
+
+  hitTest(sceneX, sceneY) {
+    if (!this.visible || !this.enabled) return null;
+
+    const insideSelf = this.containsPoint(sceneX, sceneY);
+    // Always block hits outside our own bounds (acts as viewport)
+    if (!insideSelf) return null;
+
+    const cX = this.contentX || 0;
+    const cY = this.contentY || 0;
+
+    let adjustedX = sceneX;
+    let adjustedY = sceneY;
+
+    if (cX !== 0 || cY !== 0) {
+      // Map scene → local, add content offset, map back to scene.
+      // This handles any rotation / scale applied to the Flickable itself.
+      const local = this._mapFromScene(sceneX, sceneY);
+      const adjusted = this._mapToScene(local.x + cX, local.y + cY);
+      adjustedX = adjusted.x;
+      adjustedY = adjusted.y;
+    }
+
+    for (const child of this._sortedChildItemsDescending()) {
+      const hit = child.hitTest(adjustedX, adjustedY);
+      if (hit) return hit;
+    }
+
+    // The Flickable itself is always a valid hit target within its bounds
+    // so that drag / wheel events can be captured.
+    return this;
+  }
+
+  // -----------------------------------------------------------------------
+  // Bounds helpers
+  // -----------------------------------------------------------------------
+
+  _minContentX() { return -(this.leftMargin || 0); }
+  _maxContentX() {
+    return Math.max(0, (this.contentWidth || 0) - (this.width || 0)) + (this.rightMargin || 0);
+  }
+  _minContentY() { return -(this.topMargin || 0); }
+  _maxContentY() {
+    return Math.max(0, (this.contentHeight || 0) - (this.height || 0)) + (this.bottomMargin || 0);
+  }
+
+  _canFlickH() {
+    const d = this.flickableDirection || 'VerticalFlick';
+    return d === 'HorizontalFlick' || d === 'HorizontalAndVerticalFlick';
+  }
+  _canFlickV() {
+    const d = this.flickableDirection || 'VerticalFlick';
+    return d === 'VerticalFlick' || d === 'HorizontalAndVerticalFlick';
+  }
+
+  // Apply bounds behavior during drag (returns the adjusted coordinate).
+  _applyDragBoundsX(x) {
+    const min = this._minContentX();
+    const max = this._maxContentX();
+    if (this.boundsBehavior === 'StopAtBounds') {
+      return Math.max(min, Math.min(max, x));
+    }
+    // DragOverBounds / OvershootBounds: resistance beyond limits
+    if (x < min) return min + (x - min) * 0.3;
+    if (x > max) return max + (x - max) * 0.3;
+    return x;
+  }
+  _applyDragBoundsY(y) {
+    const min = this._minContentY();
+    const max = this._maxContentY();
+    if (this.boundsBehavior === 'StopAtBounds') {
+      return Math.max(min, Math.min(max, y));
+    }
+    if (y < min) return min + (y - min) * 0.3;
+    if (y > max) return max + (y - max) * 0.3;
+    return y;
+  }
+
+  _clampX(x) {
+    return Math.max(this._minContentX(), Math.min(this._maxContentX(), x));
+  }
+  _clampY(y) {
+    return Math.max(this._minContentY(), Math.min(this._maxContentY(), y));
+  }
+
+  _isOutOfBoundsX() {
+    const x = this.contentX || 0;
+    return x < this._minContentX() || x > this._maxContentX();
+  }
+  _isOutOfBoundsY() {
+    const y = this.contentY || 0;
+    return y < this._minContentY() || y > this._maxContentY();
+  }
+
+  // -----------------------------------------------------------------------
+  // Velocity tracking
+  // -----------------------------------------------------------------------
+
+  _computeVelocity() {
+    const pts = this._velocityPoints;
+    if (pts.length < 2) return { x: 0, y: 0 };
+
+    const now = pts[pts.length - 1].t;
+    // Walk from the oldest sample toward the newest; stop at the first sample
+    // that falls within the last 100 ms.  That gives us the oldest sample in
+    // the recent window so we compute velocity over the longest stable interval.
+    let oldest = pts[pts.length - 2]; // sensible fallback: second-to-last
+    for (let i = 0; i < pts.length; i++) {
+      if (now - pts[i].t <= 100) {
+        oldest = pts[i];
+        break;
+      }
+    }
+
+    const dt = (now - oldest.t) / 1000;
+    if (dt <= 0) return { x: 0, y: 0 };
+
+    const latest = pts[pts.length - 1];
+    return {
+      x: (latest.x - oldest.x) / dt,
+      y: (latest.y - oldest.y) / dt,
+    };
+  }
+
+  // -----------------------------------------------------------------------
+  // Pointer event handling (drag-to-scroll)
+  // -----------------------------------------------------------------------
+
+  handlePointerEvent(type, event) {
+    if (!this.interactive) return false;
+
+    if (type === 'down') {
+      this._dragActive = true;
+      this._dragStartSceneX = event.sceneX;
+      this._dragStartSceneY = event.sceneY;
+      this._dragStartContentX = this.contentX || 0;
+      this._dragStartContentY = this.contentY || 0;
+      this._velocityPoints = [{ t: Date.now(), x: event.sceneX, y: event.sceneY }];
+      this._stopFlick();
+      if (!this.moving) {
+        this._setPropertyValue('moving', true);
+        this.movementStarted.emit();
+      }
+      this._setPropertyValue('dragging', true);
+      return true;
+    }
+
+    if (type === 'move' && this._dragActive) {
+      const dx = event.sceneX - this._dragStartSceneX;
+      const dy = event.sceneY - this._dragStartSceneY;
+
+      this._velocityPoints.push({ t: Date.now(), x: event.sceneX, y: event.sceneY });
+      if (this._velocityPoints.length > 20) this._velocityPoints.shift();
+
+      if (this._canFlickH()) {
+        this.contentX = this._applyDragBoundsX(this._dragStartContentX - dx);
+      }
+      if (this._canFlickV()) {
+        this.contentY = this._applyDragBoundsY(this._dragStartContentY - dy);
+      }
+
+      // Update velocity read-only properties while dragging
+      const dragVel = this._computeVelocity();
+      const dvX = -dragVel.x;
+      const dvY = -dragVel.y;
+      this._setPropertyValue('horizontalVelocity', dvX);
+      this._setPropertyValue('verticalVelocity', dvY);
+      this._setPropertyValue('velocity', { x: dvX, y: dvY });
+
+      return true;
+    }
+
+    if (type === 'up' && this._dragActive) {
+      this._dragActive = false;
+      this._setPropertyValue('dragging', false);
+
+      const vel = this._computeVelocity();
+      // Scene velocity: positive sceneX = moved right → content moved left → contentX decreased
+      const flickVX = -vel.x;
+      const flickVY = -vel.y;
+
+      const maxV = this.maximumFlickVelocity || 2500;
+      const cvx = Math.max(-maxV, Math.min(maxV, flickVX));
+      const cvy = Math.max(-maxV, Math.min(maxV, flickVY));
+
+      const threshold = 50;
+      let willFlick = false;
+
+      if (this._canFlickH() && Math.abs(cvx) > threshold) {
+        this._flickVX = cvx;
+        this._flickingH = true;
+        willFlick = true;
+      }
+      if (this._canFlickV() && Math.abs(cvy) > threshold) {
+        this._flickVY = cvy;
+        this._flickingV = true;
+        willFlick = true;
+      }
+
+      // Rebound if content was dragged out of bounds
+      if (!this._flickingH && this._isOutOfBoundsX()) {
+        this._reboundX = true;
+        willFlick = true;
+      }
+      if (!this._flickingV && this._isOutOfBoundsY()) {
+        this._reboundY = true;
+        willFlick = true;
+      }
+
+      if (willFlick) {
+        const anyKineticFlick = this._flickingH || this._flickingV;
+        if (anyKineticFlick) {
+          this._setPropertyValue('flicking', true);
+          this.flickStarted.emit();
+        }
+        this._startTicker();
+      } else {
+        // No flick: clear velocity read-only properties
+        this._setPropertyValue('horizontalVelocity', 0);
+        this._setPropertyValue('verticalVelocity', 0);
+        this._setPropertyValue('velocity', { x: 0, y: 0 });
+        this._setPropertyValue('moving', false);
+        this.movementEnded.emit();
+      }
+
+      return true;
+    }
+
+    return false;
+  }
+
+  // -----------------------------------------------------------------------
+  // Wheel event handling
+  // -----------------------------------------------------------------------
+
+  handleWheelEvent(event) {
+    if (!this.interactive) return false;
+
+    // deltaMode: 0 = pixels, 1 = lines (~40 px), 2 = pages
+    const lineSize = 40;
+    const pageH = this.height || 400;
+    const pageW = this.width || 400;
+    let dx = event.deltaX || 0;
+    let dy = event.deltaY || 0;
+    if (event.deltaMode === 1) { dx *= lineSize; dy *= lineSize; }
+    else if (event.deltaMode === 2) { dx *= pageW; dy *= pageH; }
+
+    this._stopFlick();
+
+    if (this._canFlickH() && dx !== 0) {
+      this.contentX = this._clampX((this.contentX || 0) + dx);
+    }
+    if (this._canFlickV() && dy !== 0) {
+      this.contentY = this._clampY((this.contentY || 0) + dy);
+    }
+
+    return (this._canFlickH() && dx !== 0) || (this._canFlickV() && dy !== 0);
+  }
+
+  // -----------------------------------------------------------------------
+  // Kinetic flick / rebound animation via _globalTicker
+  // -----------------------------------------------------------------------
+
+  _startTicker() {
+    if (!this._tickerActive) {
+      this._tickerActive = true;
+      _globalTicker.add(this._flickTickerObj);
+    }
+  }
+
+  _stopTicker() {
+    if (this._tickerActive) {
+      _globalTicker.remove(this._flickTickerObj);
+      this._tickerActive = false;
+    }
+  }
+
+  _stopFlick() {
+    this._flickingH = false;
+    this._flickingV = false;
+    this._reboundX = false;
+    this._reboundY = false;
+    this._flickVX = 0;
+    this._flickVY = 0;
+    this._stopTicker();
+  }
+
+  _onFlickTick(dt) {
+    if (dt <= 0) return;
+    const dtSec = dt / 1000;
+    const decel = this.flickDeceleration || 1500;
+    const bb = this.boundsBehavior || 'OvershootBounds';
+
+    // --- Horizontal flick ---
+    if (this._flickingH) {
+      const sign = this._flickVX > 0 ? 1 : -1;
+      this._flickVX -= sign * decel * dtSec;
+      // Deceleration crossed zero → stop
+      if (sign > 0 ? this._flickVX <= 0 : this._flickVX >= 0) {
+        this._flickVX = 0;
+        this._flickingH = false;
+      }
+
+      let newX = (this.contentX || 0) + this._flickVX * dtSec;
+      const minX = this._minContentX();
+      const maxX = this._maxContentX();
+
+      if (newX < minX) {
+        if (bb === 'OvershootBounds') {
+          this._flickVX = 0;
+          this._flickingH = false;
+          this._reboundX = true;
+        } else {
+          newX = minX;
+          this._flickVX = 0;
+          this._flickingH = false;
+        }
+      } else if (newX > maxX) {
+        if (bb === 'OvershootBounds') {
+          this._flickVX = 0;
+          this._flickingH = false;
+          this._reboundX = true;
+        } else {
+          newX = maxX;
+          this._flickVX = 0;
+          this._flickingH = false;
+        }
+      }
+
+      this.contentX = newX;
+    }
+
+    // --- Vertical flick ---
+    if (this._flickingV) {
+      const sign = this._flickVY > 0 ? 1 : -1;
+      this._flickVY -= sign * decel * dtSec;
+      if (sign > 0 ? this._flickVY <= 0 : this._flickVY >= 0) {
+        this._flickVY = 0;
+        this._flickingV = false;
+      }
+
+      let newY = (this.contentY || 0) + this._flickVY * dtSec;
+      const minY = this._minContentY();
+      const maxY = this._maxContentY();
+
+      if (newY < minY) {
+        if (bb === 'OvershootBounds') {
+          this._flickVY = 0;
+          this._flickingV = false;
+          this._reboundY = true;
+        } else {
+          newY = minY;
+          this._flickVY = 0;
+          this._flickingV = false;
+        }
+      } else if (newY > maxY) {
+        if (bb === 'OvershootBounds') {
+          this._flickVY = 0;
+          this._flickingV = false;
+          this._reboundY = true;
+        } else {
+          newY = maxY;
+          this._flickVY = 0;
+          this._flickingV = false;
+        }
+      }
+
+      this.contentY = newY;
+    }
+
+    // --- Rebound X (spring back to bounds) ---
+    if (this._reboundX) {
+      const minX = this._minContentX();
+      const maxX = this._maxContentX();
+      const x = this.contentX || 0;
+      const targetX = x < minX ? minX : x > maxX ? maxX : x;
+      if (x !== targetX) {
+        const factor = 1 - Math.exp(-10 * dtSec);
+        const newX = x + (targetX - x) * factor;
+        if (Math.abs(newX - targetX) < 0.5) {
+          this.contentX = targetX;
+          this._reboundX = false;
+        } else {
+          this.contentX = newX;
+        }
+      } else {
+        this._reboundX = false;
+      }
+    }
+
+    // --- Rebound Y (spring back to bounds) ---
+    if (this._reboundY) {
+      const minY = this._minContentY();
+      const maxY = this._maxContentY();
+      const y = this.contentY || 0;
+      const targetY = y < minY ? minY : y > maxY ? maxY : y;
+      if (y !== targetY) {
+        const factor = 1 - Math.exp(-10 * dtSec);
+        const newY = y + (targetY - y) * factor;
+        if (Math.abs(newY - targetY) < 0.5) {
+          this.contentY = targetY;
+          this._reboundY = false;
+        } else {
+          this.contentY = newY;
+        }
+      } else {
+        this._reboundY = false;
+      }
+    }
+
+    // --- Stop ticker when everything has settled ---
+    const anyActive = this._flickingH || this._flickingV || this._reboundX || this._reboundY;
+
+    // Keep read-only velocity properties in sync with current flick velocity
+    this._setPropertyValue('horizontalVelocity', this._flickVX);
+    this._setPropertyValue('verticalVelocity', this._flickVY);
+    this._setPropertyValue('velocity', { x: this._flickVX, y: this._flickVY });
+
+    if (!anyActive) {
+      const wasFlicking = this.flicking;
+      this._stopTicker();
+      this._setPropertyValue('flicking', false);
+      this._setPropertyValue('moving', false);
+      if (wasFlicking) this.flickEnded.emit();
+      this.movementEnded.emit();
+    }
+  }
+
+  destroy() {
+    this._stopTicker();
+    super.destroy();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Stage B: ListView – virtualized list, inherits Flickable for scrolling
+// ---------------------------------------------------------------------------
+
+class ListView extends Flickable {
   constructor(options = {}) {
     super(options);
 
@@ -3204,13 +3775,11 @@ class ListView extends Item {
 
     this.defineProperty('model', null);
     this.defineProperty('delegate', null);
-    this.defineProperty('contentY', 0);
-    this.defineProperty('contentHeight', 0);
     this.defineProperty('spacing', 0);
     this.defineProperty('cacheBuffer', 40);  // extra pixels above/below to pre-create
 
-    this.defineSignal('contentYChanged');
-
+    // contentY / contentHeight are inherited from Flickable.
+    // Re-connect virtualization to the inherited signal:
     this.connect('modelChanged', (newModel, oldModel) => this._onModelReplaced(newModel, oldModel));
     this.connect('delegateChanged', () => this._rebuild());
     this.connect('contentYChanged', () => this._updateVirtualization());
@@ -3315,7 +3884,10 @@ class ListView extends Item {
       }
     }
 
-    // Create and position items within visible range
+    // Create and position items within visible range.
+    // Items are placed at their LOGICAL content position (not offset by
+    // contentY) because the Flickable's rendering applies the -contentY
+    // translate automatically via _getContentOffset().
     for (let i = firstVisible; i <= lastVisible && i < count; i++) {
       if (!this._delegateItems[i]) {
         this._delegateItems[i] = this._createDelegateAt(i);
@@ -3330,7 +3902,9 @@ class ListView extends Item {
       }
       const item = this._delegateItems[i];
       if (item) {
-        item.y = i * this._rowHeight() - contentY;
+        // Logical (content-space) position – Flickable scrolls by translating
+        // all children by -contentY in the renderer.
+        item.y = i * this._rowHeight();
         item.x = 0;
       }
     }
@@ -3372,7 +3946,7 @@ class ListView extends Item {
     const count = _modelCount(this.model);
     if (index < 0 || index >= count) return;
     const rowH = this._rowHeight();
-    this.contentY = index * rowH;
+    this.contentY = this._clampY(index * rowH);
   }
 
   destroy() {
@@ -3995,6 +4569,7 @@ const runtimeExports = {
   ListElement,
   ListModel,
   Repeater,
+  Flickable,
   ListView,
   // Stage C: focus / keys / pointer handlers
   Keys,

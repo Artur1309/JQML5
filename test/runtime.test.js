@@ -990,8 +990,311 @@ test('ListView rebuilds when model changes', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Stage C: Focus system
+// Flickable tests
 // ---------------------------------------------------------------------------
+
+test('Flickable has required Qt-like properties', () => {
+  const { Flickable } = require('../src/runtime');
+
+  const f = new Flickable();
+
+  // Scroll content
+  assert.equal(f.contentX, 0);
+  assert.equal(f.contentY, 0);
+  assert.equal(f.contentWidth, 0);
+  assert.equal(f.contentHeight, 0);
+
+  // Behavior
+  assert.equal(f.interactive, true);
+  assert.equal(f.flickableDirection, 'VerticalFlick');
+  assert.equal(f.boundsBehavior, 'OvershootBounds');
+  assert.equal(f.pressDelay, 0);
+
+  // Read-only state
+  assert.equal(f.moving, false);
+  assert.equal(f.dragging, false);
+  assert.equal(f.flicking, false);
+
+  // Flick parameters
+  assert.equal(f.maximumFlickVelocity, 2500);
+  assert.equal(f.flickDeceleration, 1500);
+
+  // Margins
+  assert.equal(f.topMargin, 0);
+  assert.equal(f.bottomMargin, 0);
+  assert.equal(f.leftMargin, 0);
+  assert.equal(f.rightMargin, 0);
+});
+
+test('Flickable drag updates contentY', () => {
+  const { Flickable } = require('../src/runtime');
+
+  const f = new Flickable();
+  f.width = 200;
+  f.height = 200;
+  f.contentWidth = 200;
+  f.contentHeight = 600;
+
+  // Simulate pointer down at (100, 100)
+  f.handlePointerEvent('down', { sceneX: 100, sceneY: 100, x: 100, y: 100, originalEvent: null });
+  assert.equal(f.dragging, true);
+  assert.equal(f.moving, true);
+
+  // Simulate drag up (sceneY decreases → contentY increases)
+  f.handlePointerEvent('move', { sceneX: 100, sceneY: 60, x: 100, y: 60, originalEvent: null });
+  assert.ok(f.contentY > 0, `contentY should increase when dragging up, got ${f.contentY}`);
+
+  // Release
+  f.handlePointerEvent('up', { sceneX: 100, sceneY: 60, x: 100, y: 60, originalEvent: null });
+  assert.equal(f.dragging, false);
+});
+
+test('Flickable StopAtBounds clamps contentY', () => {
+  const { Flickable } = require('../src/runtime');
+
+  const f = new Flickable({ boundsBehavior: 'StopAtBounds' });
+  f.width = 200;
+  f.height = 200;
+  f.contentWidth = 200;
+  f.contentHeight = 400;  // max scroll = 200
+
+  // Drag so far that it would go beyond maxContentY
+  f.handlePointerEvent('down', { sceneX: 100, sceneY: 300, x: 100, y: 300, originalEvent: null });
+  // Drag up by 500px → would give contentY = 500, but max is 200
+  f.handlePointerEvent('move', { sceneX: 100, sceneY: -200, x: 100, y: -200, originalEvent: null });
+
+  assert.equal(f.contentY, 200, `StopAtBounds: contentY should be clamped to 200, got ${f.contentY}`);
+  f.handlePointerEvent('up', { sceneX: 100, sceneY: -200, x: 100, y: -200, originalEvent: null });
+});
+
+test('Flickable OvershootBounds allows over-drag', () => {
+  const { Flickable } = require('../src/runtime');
+
+  const f = new Flickable({ boundsBehavior: 'OvershootBounds' });
+  f.width = 200;
+  f.height = 200;
+  f.contentWidth = 200;
+  f.contentHeight = 400;  // max scroll = 200
+
+  // Drag up by 500px → contentY goes beyond 200 (with resistance)
+  f.handlePointerEvent('down', { sceneX: 100, sceneY: 300, x: 100, y: 300, originalEvent: null });
+  f.handlePointerEvent('move', { sceneX: 100, sceneY: -200, x: 100, y: -200, originalEvent: null });
+
+  assert.ok(f.contentY > 200, `OvershootBounds: contentY should exceed 200 during drag, got ${f.contentY}`);
+  assert.ok(f.contentY < 500, `OvershootBounds: contentY should have resistance, got ${f.contentY}`);
+  f.handlePointerEvent('up', { sceneX: 100, sceneY: -200, x: 100, y: -200, originalEvent: null });
+});
+
+test('Flickable OvershootBounds rebounds after overshoot', () => {
+  const { Flickable, AnimationTicker } = require('../src/runtime');
+
+  const f = new Flickable({ boundsBehavior: 'OvershootBounds' });
+  f.width = 200;
+  f.height = 200;
+  f.contentWidth = 200;
+  f.contentHeight = 400;  // max scroll = 200
+
+  // Force contentY into overshoot
+  f._setPropertyValue('contentY', 250);  // 50px over max
+  f._reboundY = true;
+  f._startTicker();
+
+  // Advance ticker several times to simulate animation
+  const initialY = f.contentY;
+  f._onFlickTick(50);  // 50ms
+  assert.ok(f.contentY < initialY, `contentY should decrease toward bound, was ${initialY}, now ${f.contentY}`);
+
+  // After many ticks the content should settle at the max bound
+  for (let i = 0; i < 30; i++) {
+    f._onFlickTick(50);
+    if (!f._reboundY) break;
+  }
+  assert.ok(Math.abs(f.contentY - 200) < 1, `contentY should rebound to 200, got ${f.contentY}`);
+  f.destroy();
+});
+
+test('Flickable flick inertia decelerates to stop', () => {
+  const { Flickable } = require('../src/runtime');
+
+  const f = new Flickable({ boundsBehavior: 'StopAtBounds' });
+  f.width = 200;
+  f.height = 200;
+  f.contentWidth = 200;
+  f.contentHeight = 10000;  // very long content
+
+  // Give it a starting flick velocity
+  f._flickVY = 1000;  // px/s downward
+  f._flickingV = true;
+  f._setPropertyValue('moving', true);
+  f._setPropertyValue('flicking', true);
+  f._startTicker();
+
+  const startY = f.contentY;
+
+  // Advance 200ms
+  f._onFlickTick(200);
+  const y200 = f.contentY;
+  assert.ok(y200 > startY, `contentY should increase after 200ms of flicking, was ${startY}, now ${y200}`);
+  assert.ok(f._flickVY < 1000, `velocity should have decreased, was 1000, now ${f._flickVY}`);
+
+  // Advance many ticks until flick stops
+  for (let i = 0; i < 50; i++) {
+    if (!f._flickingV) break;
+    f._onFlickTick(50);
+  }
+  assert.equal(f._flickingV, false, 'flick should have stopped');
+  assert.equal(f._flickVY, 0, 'flick velocity should be 0');
+  // velocity properties should have been cleared
+  assert.equal(f.verticalVelocity, 0, 'verticalVelocity should be 0 after flick stops');
+  f.destroy();
+});
+
+test('Flickable wheel event updates contentY', () => {
+  const { Flickable } = require('../src/runtime');
+
+  const f = new Flickable();
+  f.width = 200;
+  f.height = 200;
+  f.contentWidth = 200;
+  f.contentHeight = 600;
+
+  // Simulate wheel scroll down by 80px (deltaMode=0)
+  const accepted = f.handleWheelEvent({ deltaX: 0, deltaY: 80, deltaMode: 0 });
+  assert.equal(accepted, true, 'wheel event should be accepted');
+  assert.equal(f.contentY, 80, `contentY should be 80 after wheel, got ${f.contentY}`);
+
+  // Wheel clamps at max
+  f.handleWheelEvent({ deltaX: 0, deltaY: 1000, deltaMode: 0 });
+  assert.equal(f.contentY, 400, `contentY should be clamped at max (400), got ${f.contentY}`);
+});
+
+test('Flickable wheel respects flickableDirection', () => {
+  const { Flickable } = require('../src/runtime');
+
+  const fV = new Flickable({ flickableDirection: 'VerticalFlick' });
+  fV.width = 200;
+  fV.height = 200;
+  fV.contentWidth = 600;
+  fV.contentHeight = 600;
+
+  // Horizontal wheel should not scroll
+  fV.handleWheelEvent({ deltaX: 80, deltaY: 0, deltaMode: 0 });
+  assert.equal(fV.contentX, 0, 'VerticalFlick should not accept horizontal wheel');
+
+  // Vertical wheel should scroll
+  fV.handleWheelEvent({ deltaX: 0, deltaY: 80, deltaMode: 0 });
+  assert.equal(fV.contentY, 80, 'VerticalFlick should accept vertical wheel');
+});
+
+test('Flickable _getContentOffset returns correct offset', () => {
+  const { Flickable } = require('../src/runtime');
+
+  const f = new Flickable();
+  assert.equal(f._getContentOffset(), null, 'no offset when contentX/Y are 0');
+
+  f._setPropertyValue('contentY', 100);
+  const offset = f._getContentOffset();
+  assert.ok(offset !== null, 'should return offset when contentY != 0');
+  assert.equal(offset.x, 0);
+  assert.equal(offset.y, 100);
+});
+
+test('Flickable hitTest accounts for content offset', () => {
+  const { Flickable, Item } = require('../src/runtime');
+
+  const root = new Item();
+  root.width = 400;
+  root.height = 400;
+
+  const f = new Flickable({ parentItem: root });
+  f.x = 0;
+  f.y = 0;
+  f.width = 200;
+  f.height = 200;
+  f.contentHeight = 400;
+
+  const child = new Item({ parentItem: f });
+  child.x = 0;
+  child.y = 200;  // logical content position: 200px down
+  child.width = 200;
+  child.height = 40;
+
+  // Before scroll: child is at y=200, outside viewport (0..200), should not be hit at y=50
+  const hitBefore = f.hitTest(50, 50);
+  assert.ok(hitBefore === f, 'should hit the Flickable itself since child is out of viewport');
+
+  // Scroll to contentY=200: child should now be at visual y=0
+  f._setPropertyValue('contentY', 200);
+
+  // The child is now visible at visual y=0. Click at scene (50, 10) should hit the child.
+  const hitAfter = f.hitTest(50, 10);
+  assert.ok(hitAfter === child, `expected child to be hit after scroll, got ${hitAfter?.constructor?.name}`);
+  root.destroy();
+});
+
+test('ListView inherits Flickable and scrolls via contentY', () => {
+  const { ListView, Flickable, ListModel, Component, Item, Context } = require('../src/runtime');
+
+  assert.ok(new ListView() instanceof Flickable, 'ListView should be a Flickable');
+
+  const model = new ListModel();
+  for (let i = 0; i < 20; i++) model.append({ n: i });
+
+  const lv = new ListView();
+  lv.width = 200;
+  lv.height = 200;
+  lv._delegateHeight = 40;
+  lv.cacheBuffer = 0;
+  lv.setContext(new Context(null, {}));
+
+  const delegate = new Component(({ parent: p }) => {
+    const item = new Item({ parentItem: p });
+    item.height = 40;
+    return item;
+  });
+
+  lv.model = model;
+  lv.delegate = delegate;
+
+  // Verify items are at logical content positions (not offset by contentY)
+  assert.equal(lv.itemAt(0)?.y, 0, 'item 0 should be at y=0 in content space');
+  assert.equal(lv.itemAt(4)?.y, 160, 'item 4 should be at y=160 in content space');
+
+  // Scroll
+  lv.contentY = 80;
+  assert.equal(lv.itemAt(2)?.y, 80, 'item 2 y should be 80 (logical content position)');
+  assert.equal(lv.contentY, 80, 'contentY should be 80 after scroll');
+  lv.destroy();
+});
+
+test('ListView positionViewAtIndex scrolls to correct position', () => {
+  const { ListView, ListModel, Component, Item, Context } = require('../src/runtime');
+
+  const model = new ListModel();
+  for (let i = 0; i < 50; i++) model.append({ n: i });
+
+  const lv = new ListView();
+  lv.width = 200;
+  lv.height = 200;
+  lv._delegateHeight = 40;
+  lv.cacheBuffer = 0;
+  lv.setContext(new Context(null, {}));
+
+  const delegate = new Component(({ parent: p }) => {
+    const item = new Item({ parentItem: p });
+    item.height = 40;
+    return item;
+  });
+
+  lv.model = model;
+  lv.delegate = delegate;
+
+  lv.positionViewAtIndex(10);
+  assert.equal(lv.contentY, 400, 'positionViewAtIndex(10) should set contentY to 400');
+  lv.destroy();
+});
+
+
 
 test('Item has focus, activeFocus, focusable, activeFocusOnTab, focusScope properties', () => {
   const { Item } = require('../src/runtime');
