@@ -684,6 +684,7 @@ class Item extends QtObject {
 
     // Save base values for properties we haven't saved yet
     for (const { target, propName, toValue: _toValue } of affected) {
+      if (!target || target._objectId == null) continue;
       const key = `${target._objectId}:${propName}`;
       if (!this._baseValues.has(key)) {
         this._baseValues.set(key, target[propName]);
@@ -694,7 +695,7 @@ class Item extends QtObject {
     if (prevState) {
       for (const pc of prevState.propertyChanges) {
         const target = pc.target;
-        if (!target) continue;
+        if (!target || target._objectId == null) continue;
         for (const propName of Object.keys(pc.changes)) {
           const key = `${target._objectId}:${propName}`;
           if (this._baseValues.has(key)) {
@@ -1396,6 +1397,9 @@ class Animation extends QObject {
   }
 }
 
+// Shared no-op ticker for child animations managed by container animations
+const _nullTicker = Object.freeze({ add: () => {}, remove: () => {} });
+
 // ---------------------------------------------------------------------------
 // NumberAnimation
 // ---------------------------------------------------------------------------
@@ -1446,7 +1450,7 @@ function _parseColor(color) {
   const hex = color.trim();
   if (hex.startsWith('#')) {
     const h = hex.slice(1);
-    let r, g, b, a = 255;
+    let r = 0, g = 0, b = 0, a = 255;
     if (h.length === 3) {
       r = parseInt(h[0] + h[0], 16);
       g = parseInt(h[1] + h[1], 16);
@@ -1538,7 +1542,7 @@ class SequentialAnimation extends Animation {
     this._currentIndex = 0;
     this._totalDuration = this._children.reduce((sum, a) => sum + (a.duration || 0), 0);
     for (const child of this._children) {
-      child._ticker = { add: () => {}, remove: () => {} };
+      child._ticker = _nullTicker;
     }
   }
 
@@ -1622,7 +1626,7 @@ class ParallelAnimation extends Animation {
   _onStart() {
     this._totalDuration = 0;
     for (const child of this._children) {
-      child._ticker = { add: () => {}, remove: () => {} };
+      child._ticker = _nullTicker;
       child._elapsed = 0;
       child._loopsDone = 0;
       child._started = true;

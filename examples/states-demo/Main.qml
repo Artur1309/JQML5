@@ -6,8 +6,6 @@ Item {
   width: 800
   height: 500
 
-  property string demoState: ""
-
   // ── Background ────────────────────────────────────────────────────────────
   Rectangle {
     anchors.fill: root
@@ -89,7 +87,7 @@ Item {
     MouseArea {
       anchors.fill: toggleBtn
       onClicked: {
-        root.demoState = root.demoState === "expanded" ? "" : "expanded";
+        root.state = root.state === "expanded" ? "" : "expanded";
       }
     }
   }
@@ -164,10 +162,4 @@ Item {
       NumberAnimation { duration: 300; easing: "InQuad" }
     }
   ]
-
-  // Wire demoState to the state property
-  // (In real QML this would be state: demoState binding)
-  onDemoStateChanged: {
-    root.state = demoState;
-  }
 }
