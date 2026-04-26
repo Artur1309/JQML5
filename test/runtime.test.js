@@ -2589,3 +2589,518 @@ test('Column with empty children reports zero implicit size', async () => {
   assert.equal(col.implicitWidth, 0);
   assert.equal(col.implicitHeight, 0);
 });
+
+// ---------------------------------------------------------------------------
+// QtQuick.Layouts: RowLayout / ColumnLayout / GridLayout tests
+// ---------------------------------------------------------------------------
+
+// Helper: wait one microtask for _scheduleLayout to run
+const nextTick = () => new Promise((r) => Promise.resolve().then(r));
+
+test('RowLayout distributes remaining width equally among fillWidth children', async () => {
+  const { RowLayout, Item } = require('../src/runtime');
+
+  const row = new RowLayout();
+  row.width  = 300;
+  row.height = 50;
+  row.spacing = 0;
+
+  // Two fill children
+  const a = new Item({ parentItem: row });
+  a.__layoutAttached = { fillWidth: true };
+
+  const b = new Item({ parentItem: row });
+  b.__layoutAttached = { fillWidth: true };
+
+  await nextTick();
+
+  // Each should receive 150px
+  assert.equal(a.width, 150);
+  assert.equal(b.width, 150);
+  assert.equal(row.implicitWidth, 300);
+});
+
+test('RowLayout respects minimumWidth and maximumWidth when distributing', async () => {
+  const { RowLayout, Item } = require('../src/runtime');
+
+  const row = new RowLayout();
+  row.width  = 200;
+  row.spacing = 0;
+
+  const a = new Item({ parentItem: row });
+  a.__layoutAttached = { fillWidth: true, maximumWidth: 60 };
+
+  const b = new Item({ parentItem: row });
+  b.__layoutAttached = { fillWidth: true, minimumWidth: 20 };
+
+  await nextTick();
+
+  // a is capped at 60; b gets the rest: 200 - 60 = 140
+  assert.equal(a.width, 60);
+  assert.equal(b.width, 140);
+});
+
+test('RowLayout places fixed-width children and then fillWidth child with remaining space', async () => {
+  const { RowLayout, Item } = require('../src/runtime');
+
+  const row = new RowLayout();
+  row.width   = 400;
+  row.height  = 40;
+  row.spacing = 10;
+
+  const fixed = new Item({ parentItem: row });
+  fixed.width = 100;
+
+  const filler = new Item({ parentItem: row });
+  filler.__layoutAttached = { fillWidth: true };
+
+  await nextTick();
+
+  // filler gets 400 - 10 (spacing) - 100 = 290
+  assert.equal(fixed.width,  100);
+  assert.equal(filler.width, 290);
+  assert.equal(fixed.x,   0);
+  assert.equal(filler.x, 110); // 100 + 10
+});
+
+test('RowLayout vertical alignment: vcenter (default)', async () => {
+  const { RowLayout, Item } = require('../src/runtime');
+
+  const row = new RowLayout();
+  row.width  = 200;
+  row.height = 100;
+  row.spacing = 0;
+
+  const child = new Item({ parentItem: row });
+  child.width = 50; child.height = 40;
+  // No fillHeight, no alignment → vcenter by default
+
+  await nextTick();
+
+  // availH = 100, itemH = 40 → cy = 0 + (100-40)/2 = 30
+  assert.equal(child.y, 30);
+});
+
+test('RowLayout vertical alignment: AlignTop', async () => {
+  const { RowLayout, Item } = require('../src/runtime');
+
+  const row = new RowLayout();
+  row.width  = 200;
+  row.height = 100;
+  row.spacing = 0;
+
+  const child = new Item({ parentItem: row });
+  child.width = 50; child.height = 40;
+  child.__layoutAttached = { alignment: 'AlignTop' };
+
+  await nextTick();
+
+  assert.equal(child.y, 0);
+});
+
+test('RowLayout vertical alignment: AlignBottom', async () => {
+  const { RowLayout, Item } = require('../src/runtime');
+
+  const row = new RowLayout();
+  row.width  = 200;
+  row.height = 100;
+  row.spacing = 0;
+
+  const child = new Item({ parentItem: row });
+  child.width = 50; child.height = 40;
+  child.__layoutAttached = { alignment: 'AlignBottom' };
+
+  await nextTick();
+
+  // cy = 0 + 100 - 0 (bm) - 40 = 60
+  assert.equal(child.y, 60);
+});
+
+test('RowLayout fillHeight stretches child to available height', async () => {
+  const { RowLayout, Item } = require('../src/runtime');
+
+  const row = new RowLayout();
+  row.width  = 200;
+  row.height = 100;
+  row.spacing = 0;
+
+  const child = new Item({ parentItem: row });
+  child.width = 50;
+  child.__layoutAttached = { fillHeight: true };
+
+  await nextTick();
+
+  assert.equal(child.height, 100);
+  assert.equal(child.y,      0);
+});
+
+test('RowLayout child margins reduce allocated space', async () => {
+  const { RowLayout, Item } = require('../src/runtime');
+
+  const row = new RowLayout();
+  row.width   = 200;
+  row.height  = 50;
+  row.spacing = 0;
+
+  const child = new Item({ parentItem: row });
+  child.__layoutAttached = { fillWidth: true, margins: 10 };
+
+  await nextTick();
+
+  // margins: 10 on each side → content area 200 - 20 = 180; child placed at x=10
+  assert.equal(child.width, 180);
+  assert.equal(child.x,      10);
+});
+
+test('RowLayout updates implicit size when child is added', async () => {
+  const { RowLayout, Item } = require('../src/runtime');
+
+  const row = new RowLayout();
+  row.spacing = 5;
+
+  const a = new Item({ parentItem: row });
+  a.width = 50; a.height = 30;
+
+  await nextTick();
+  assert.equal(row.implicitWidth, 50);
+
+  const b = new Item({ parentItem: row });
+  b.width = 70; b.height = 20;
+
+  await nextTick();
+  assert.equal(row.implicitWidth, 125); // 50 + 5 + 70
+});
+
+// ---------------------------------------------------------------------------
+// ColumnLayout
+// ---------------------------------------------------------------------------
+
+test('ColumnLayout distributes remaining height among fillHeight children', async () => {
+  const { ColumnLayout, Item } = require('../src/runtime');
+
+  const col = new ColumnLayout();
+  col.width  = 100;
+  col.height = 300;
+  col.spacing = 0;
+
+  const a = new Item({ parentItem: col });
+  a.__layoutAttached = { fillHeight: true };
+
+  const b = new Item({ parentItem: col });
+  b.__layoutAttached = { fillHeight: true };
+
+  await nextTick();
+
+  assert.equal(a.height, 150);
+  assert.equal(b.height, 150);
+});
+
+test('ColumnLayout places fixed-height child then fillHeight child', async () => {
+  const { ColumnLayout, Item } = require('../src/runtime');
+
+  const col = new ColumnLayout();
+  col.width  = 100;
+  col.height = 300;
+  col.spacing = 10;
+
+  const fixed = new Item({ parentItem: col });
+  fixed.height = 80;
+
+  const filler = new Item({ parentItem: col });
+  filler.__layoutAttached = { fillHeight: true };
+
+  await nextTick();
+
+  assert.equal(fixed.y,   0);
+  assert.equal(filler.y, 90); // 80 + 10
+  assert.equal(filler.height, 210); // 300 - 80 - 10
+});
+
+test('ColumnLayout horizontal alignment: AlignHCenter', async () => {
+  const { ColumnLayout, Item } = require('../src/runtime');
+
+  const col = new ColumnLayout();
+  col.width  = 200;
+  col.height = 200;
+  col.spacing = 0;
+
+  const child = new Item({ parentItem: col });
+  child.width = 60; child.height = 40;
+  child.__layoutAttached = { alignment: 'AlignHCenter' };
+
+  await nextTick();
+
+  // center: (200 - 60) / 2 = 70
+  assert.equal(child.x, 70);
+});
+
+test('ColumnLayout horizontal alignment: AlignRight', async () => {
+  const { ColumnLayout, Item } = require('../src/runtime');
+
+  const col = new ColumnLayout();
+  col.width  = 200;
+  col.height = 200;
+  col.spacing = 0;
+
+  const child = new Item({ parentItem: col });
+  child.width = 60; child.height = 40;
+  child.__layoutAttached = { alignment: 'AlignRight' };
+
+  await nextTick();
+
+  assert.equal(child.x, 140); // 200 - 60
+});
+
+test('ColumnLayout fillWidth stretches child to available width', async () => {
+  const { ColumnLayout, Item } = require('../src/runtime');
+
+  const col = new ColumnLayout();
+  col.width  = 200;
+  col.height = 100;
+  col.spacing = 0;
+
+  const child = new Item({ parentItem: col });
+  child.height = 40;
+  child.__layoutAttached = { fillWidth: true };
+
+  await nextTick();
+
+  assert.equal(child.width, 200);
+  assert.equal(child.x,     0);
+});
+
+test('ColumnLayout empty children reports zero implicit size', async () => {
+  const { ColumnLayout } = require('../src/runtime');
+
+  const col = new ColumnLayout();
+  await nextTick();
+
+  assert.equal(col.implicitWidth,  0);
+  assert.equal(col.implicitHeight, 0);
+});
+
+// ---------------------------------------------------------------------------
+// GridLayout
+// ---------------------------------------------------------------------------
+
+test('GridLayout places children in a single row by default (auto-placement)', async () => {
+  const { GridLayout, Item } = require('../src/runtime');
+
+  const grid = new GridLayout();
+  grid.spacing = 5;
+
+  const a = new Item({ parentItem: grid });
+  a.width = 50; a.height = 30;
+
+  const b = new Item({ parentItem: grid });
+  b.width = 60; b.height = 40;
+
+  await nextTick();
+
+  // Auto-placement, no columns set → single row
+  assert.equal(a.x, 0);
+  assert.equal(b.x, 55); // 50 + 5
+  assert.equal(a.y, 0);
+  assert.equal(b.y, 0);
+});
+
+test('GridLayout wraps at specified columns count', async () => {
+  const { GridLayout, Item } = require('../src/runtime');
+
+  const grid = new GridLayout();
+  grid.columns = 2;
+  grid.spacing = 0;
+
+  const items = [];
+  for (let i = 0; i < 4; i++) {
+    const it = new Item({ parentItem: grid });
+    it.width = 50; it.height = 30;
+    items.push(it);
+  }
+
+  await nextTick();
+
+  // 2 columns: (0,0) (0,1) (1,0) (1,1)
+  assert.equal(items[0].x,  0); assert.equal(items[0].y,  0);
+  assert.equal(items[1].x, 50); assert.equal(items[1].y,  0);
+  assert.equal(items[2].x,  0); assert.equal(items[2].y, 30);
+  assert.equal(items[3].x, 50); assert.equal(items[3].y, 30);
+});
+
+test('GridLayout respects explicit Layout.row / Layout.column', async () => {
+  const { GridLayout, Item } = require('../src/runtime');
+
+  const grid = new GridLayout();
+  grid.spacing = 0;
+
+  const a = new Item({ parentItem: grid });
+  a.width = 40; a.height = 30;
+  a.__layoutAttached = { row: 0, column: 1 }; // second column, first row
+
+  const b = new Item({ parentItem: grid });
+  b.width = 60; b.height = 25;
+  b.__layoutAttached = { row: 1, column: 0 }; // first column, second row
+
+  await nextTick();
+
+  // a is at col 1 → x = colW[0] = 0 (no item in col 0, row 0) ... actually
+  // col 0 width = prefW of b = 60; col 1 width = prefW of a = 40
+  assert.equal(a.x, 60); // after col 0 (width 60)
+  assert.equal(a.y, 0);
+  assert.equal(b.x, 0);
+  assert.equal(b.y, 30); // after row 0 (height 30)
+});
+
+test('GridLayout distributes extra width to fillWidth columns', async () => {
+  const { GridLayout, Item } = require('../src/runtime');
+
+  const grid = new GridLayout();
+  grid.columns = 2;
+  grid.width   = 200;
+  grid.height  = 50;
+  grid.spacing = 0;
+
+  const a = new Item({ parentItem: grid });
+  a.width = 50; a.height = 50;
+  // No fill: stays at preferred width
+
+  const b = new Item({ parentItem: grid });
+  b.height = 50;
+  b.__layoutAttached = { fillWidth: true };
+
+  await nextTick();
+
+  // col 0 = 50 (no fill); col 1 fills: 200 - 50 = 150
+  assert.equal(a.width, 50);
+  assert.equal(b.width, 150);
+  assert.equal(b.x,      50);
+});
+
+test('GridLayout distributes extra height to fillHeight rows', async () => {
+  const { GridLayout, Item } = require('../src/runtime');
+
+  const grid = new GridLayout();
+  grid.columns = 1;
+  grid.width   = 100;
+  grid.height  = 200;
+  grid.spacing = 0;
+
+  const a = new Item({ parentItem: grid });
+  a.width = 100; a.height = 40;
+
+  const b = new Item({ parentItem: grid });
+  b.width = 100; b.height = 40;
+  b.__layoutAttached = { fillHeight: true };
+
+  await nextTick();
+
+  // row 0 = 40; row 1 fills: 200 - 40 = 160
+  assert.equal(a.height, 40);
+  assert.equal(b.height, 160);
+  assert.equal(b.y,       40);
+});
+
+test('GridLayout rowSpacing / columnSpacing work independently', async () => {
+  const { GridLayout, Item } = require('../src/runtime');
+
+  const grid = new GridLayout();
+  grid.columns       = 2;
+  grid.columnSpacing = 10;
+  grid.rowSpacing    = 20;
+
+  for (let i = 0; i < 4; i++) {
+    const it = new Item({ parentItem: grid });
+    it.width = 50; it.height = 30;
+  }
+
+  await nextTick();
+
+  // Row 0: y=0; Row 1: y = 30 + 20 = 50
+  // Col 0: x=0; Col 1: x = 50 + 10 = 60
+  const kids = grid._childItems;
+  assert.equal(kids[0].x,  0); assert.equal(kids[0].y,  0);
+  assert.equal(kids[1].x, 60); assert.equal(kids[1].y,  0);
+  assert.equal(kids[2].x,  0); assert.equal(kids[2].y, 50);
+  assert.equal(kids[3].x, 60); assert.equal(kids[3].y, 50);
+});
+
+test('GridLayout implicit size matches content size', async () => {
+  const { GridLayout, Item } = require('../src/runtime');
+
+  const grid = new GridLayout();
+  grid.columns = 3;
+  grid.spacing = 4;
+
+  for (let i = 0; i < 3; i++) {
+    const it = new Item({ parentItem: grid });
+    it.width = 50; it.height = 30;
+  }
+
+  await nextTick();
+
+  // 3 cols × 50 + 2 × 4 spacing = 158; 1 row × 30 = 30
+  assert.equal(grid.implicitWidth,  158);
+  assert.equal(grid.implicitHeight,  30);
+});
+
+test('GridLayout TopToBottom flow places items in columns first', async () => {
+  const { GridLayout, Item } = require('../src/runtime');
+
+  const grid = new GridLayout();
+  grid.flow  = 'TopToBottom';
+  grid.rows  = 2;
+  grid.spacing = 0;
+
+  const items = [];
+  for (let i = 0; i < 4; i++) {
+    const it = new Item({ parentItem: grid });
+    it.width = 50; it.height = 30;
+    items.push(it);
+  }
+
+  await nextTick();
+
+  // TopToBottom, rows=2: col 0 → items 0,1; col 1 → items 2,3
+  assert.equal(items[0].x,  0); assert.equal(items[0].y,  0);
+  assert.equal(items[1].x,  0); assert.equal(items[1].y, 30);
+  assert.equal(items[2].x, 50); assert.equal(items[2].y,  0);
+  assert.equal(items[3].x, 50); assert.equal(items[3].y, 30);
+});
+
+test('GridLayout child per-side margins offset placement', async () => {
+  const { GridLayout, Item } = require('../src/runtime');
+
+  const grid = new GridLayout();
+  grid.columns = 1;
+  grid.spacing = 0;
+
+  const child = new Item({ parentItem: grid });
+  child.width = 50; child.height = 30;
+  child.__layoutAttached = { leftMargin: 8, topMargin: 5 };
+
+  await nextTick();
+
+  // Child placed at (8, 5)
+  assert.equal(child.x, 8);
+  assert.equal(child.y, 5);
+});
+
+test('RowLayout re-layouts when child size changes', async () => {
+  const { RowLayout, Item } = require('../src/runtime');
+
+  const row = new RowLayout();
+  row.spacing = 0;
+
+  const a = new Item({ parentItem: row });
+  a.width = 100; a.height = 30;
+
+  const b = new Item({ parentItem: row });
+  b.width = 50; b.height = 30;
+
+  await nextTick();
+  assert.equal(row.implicitWidth, 150);
+
+  b.width = 90;
+  await nextTick();
+  assert.equal(row.implicitWidth, 190);
+});

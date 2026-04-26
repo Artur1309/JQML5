@@ -1000,3 +1000,78 @@ Item {
   assert.match(js, /__layoutAttached/);
   assert.match(js, /fillWidth/);
 });
+
+// ---------------------------------------------------------------------------
+// QtQuick.Layouts: RowLayout / ColumnLayout / GridLayout compile without error
+// ---------------------------------------------------------------------------
+
+test('QtQuick.Layouts: RowLayout, ColumnLayout, GridLayout compile and emit correct runtime calls', async () => {
+  const fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), 'jqmlc-layouts-'));
+  const outdir = path.join(fixtureDir, 'out');
+  fs.mkdirSync(outdir, { recursive: true });
+
+  fs.writeFileSync(path.join(fixtureDir, 'Main.qml'), `
+import QtQuick 2.15
+import QtQuick.Layouts 1.15
+Item {
+  id: root
+  width: 600
+  height: 400
+
+  RowLayout {
+    anchors.fill: parent
+    spacing: 8
+
+    Rectangle {
+      Layout.fillWidth: true
+      Layout.fillHeight: true
+      Layout.minimumWidth: 50
+      color: "steelblue"
+    }
+
+    Rectangle {
+      Layout.preferredWidth: 120
+      Layout.fillHeight: true
+      Layout.alignment: Qt.AlignTop
+      color: "coral"
+    }
+  }
+
+  ColumnLayout {
+    spacing: 4
+
+    Rectangle { Layout.fillWidth: true; height: 30; color: "green" }
+    Rectangle { Layout.fillWidth: true; height: 30; color: "red" }
+  }
+
+  GridLayout {
+    columns: 2
+    columnSpacing: 6
+    rowSpacing: 6
+
+    Rectangle { Layout.row: 0; Layout.column: 0; width: 80; height: 60; color: "orange" }
+    Rectangle { Layout.row: 0; Layout.column: 1; width: 80; height: 60; color: "purple" }
+  }
+}
+`, 'utf8');
+
+  const result = await compileQmlApplication({
+    entryFile: path.join(fixtureDir, 'Main.qml'),
+    outdir,
+  });
+
+  assert.equal(result.componentCount >= 1, true);
+  const js = fs.readFileSync(path.join(outdir, 'app.js'), 'utf8');
+
+  // New types must be instantiated
+  assert.match(js, /RowLayout/);
+  assert.match(js, /ColumnLayout/);
+  assert.match(js, /GridLayout/);
+
+  // Layout.* attached props stored
+  assert.match(js, /__layoutAttached/);
+  assert.match(js, /fillWidth/);
+  assert.match(js, /fillHeight/);
+  assert.match(js, /minimumWidth/);
+  assert.match(js, /preferredWidth/);
+});

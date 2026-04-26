@@ -72,6 +72,10 @@ const RUNTIME_TYPES = [
   ['Row', { kind: 'runtime', runtimeExport: 'Row', category: 'quick-layout', isItem: true }],
   ['Column', { kind: 'runtime', runtimeExport: 'Column', category: 'quick-layout', isItem: true }],
   ['Flow', { kind: 'runtime', runtimeExport: 'Flow', category: 'quick-layout', isItem: true }],
+  // QtQuick.Layouts
+  ['RowLayout', { kind: 'runtime', runtimeExport: 'RowLayout', category: 'quick-layout', isItem: true }],
+  ['ColumnLayout', { kind: 'runtime', runtimeExport: 'ColumnLayout', category: 'quick-layout', isItem: true }],
+  ['GridLayout', { kind: 'runtime', runtimeExport: 'GridLayout', category: 'quick-layout', isItem: true }],
   // Stage C: focus / keys / pointer handlers
   ['Keys', { kind: 'runtime', runtimeExport: 'Keys', category: 'quick-input' }],
   ['TapHandler', { kind: 'runtime', runtimeExport: 'TapHandler', category: 'quick-input', isItem: true }],
@@ -114,10 +118,9 @@ function createDefaultRegistries() {
   modules.registerModule('QtQuick.Controls', {
     listTypes: () => ['Button', 'Label', 'TextField', 'Slider', 'CheckBox'],
   });
-  // QtQuick.Layouts: no additional runtime types yet; Layout.* attached properties
-  // are handled by the codegen property loop and stored in object.__layoutAttached.
+  // QtQuick.Layouts
   modules.registerModule('QtQuick.Layouts', {
-    listTypes: () => [],
+    listTypes: () => ['RowLayout', 'ColumnLayout', 'GridLayout'],
   });
 
   return {
