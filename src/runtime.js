@@ -4902,6 +4902,652 @@ class Flow extends Positioner {
   }
 }
 
+// ---------------------------------------------------------------------------
+// QtQuick.Layouts: RowLayout, ColumnLayout, GridLayout
+// ---------------------------------------------------------------------------
+
+/** Floating-point epsilon used when comparing clamped fill sizes. */
+const _FILL_EPSILON = 0.001;
+
+/**
+ * LayoutContainer – base class for RowLayout, ColumnLayout, GridLayout.
+ *
+ * Provides:
+ *  - spacing, padding (and per-side paddingLeft/Right/Top/Bottom)
+ *  - child tracking (watches width/height/implicitWidth/implicitHeight/visible)
+ *  - _scheduleLayout() / _doLayout() (overridden by subclasses)
+ *  - static helpers for reading Layout.* attached properties
+ */
+class LayoutContainer extends Item {
+  constructor(options = {}) {
+    super(options);
+
+    this._layoutScheduled = false;
+    this._childDisconnectors = new Map();
+
+    this.defineProperty('spacing', 0, { onChanged: () => this._scheduleLayout() });
+    this.defineProperty('padding', 0, { onChanged: () => this._scheduleLayout() });
+    this.defineProperty('topPadding', undefined, { onChanged: () => this._scheduleLayout() });
+    this.defineProperty('bottomPadding', undefined, { onChanged: () => this._scheduleLayout() });
+    this.defineProperty('leftPadding', undefined, { onChanged: () => this._scheduleLayout() });
+    this.defineProperty('rightPadding', undefined, { onChanged: () => this._scheduleLayout() });
+
+    this.connect('widthChanged', () => this._scheduleLayout());
+    this.connect('heightChanged', () => this._scheduleLayout());
+  }
+
+  _pt() { return this.topPadding    !== undefined ? this.topPadding    : this.padding; }
+  _pb() { return this.bottomPadding !== undefined ? this.bottomPadding : this.padding; }
+  _pl() { return this.leftPadding   !== undefined ? this.leftPadding   : this.padding; }
+  _pr() { return this.rightPadding  !== undefined ? this.rightPadding  : this.padding; }
+
+  // ------------------------------------------------------------------
+  // Layout.* attached-property helpers
+  // ------------------------------------------------------------------
+
+  /** Returns the __layoutAttached bag for a child (or an empty object). */
+  static _la(child) {
+    return child.__layoutAttached || {};
+  }
+
+  static _leftMargin(la)   { return la.leftMargin   !== undefined ? la.leftMargin   : (la.margins || 0); }
+  static _rightMargin(la)  { return la.rightMargin  !== undefined ? la.rightMargin  : (la.margins || 0); }
+  static _topMargin(la)    { return la.topMargin    !== undefined ? la.topMargin    : (la.margins || 0); }
+  static _bottomMargin(la) { return la.bottomMargin !== undefined ? la.bottomMargin : (la.margins || 0); }
+
+  static _prefW(child, la) {
+    if (la.preferredWidth !== undefined && la.preferredWidth >= 0) return la.preferredWidth;
+    const cw = child.width || 0;
+    return cw > 0 ? cw : (child.implicitWidth || 0);
+  }
+
+  static _prefH(child, la) {
+    if (la.preferredHeight !== undefined && la.preferredHeight >= 0) return la.preferredHeight;
+    const ch = child.height || 0;
+    return ch > 0 ? ch : (child.implicitHeight || 0);
+  }
+
+  static _minW(la) { return la.minimumWidth  !== undefined ? la.minimumWidth  : 0; }
+  static _minH(la) { return la.minimumHeight !== undefined ? la.minimumHeight : 0; }
+  static _maxW(la) { return la.maximumWidth  !== undefined ? la.maximumWidth  : Infinity; }
+  static _maxH(la) { return la.maximumHeight !== undefined ? la.maximumHeight : Infinity; }
+
+  /**
+   * Decode horizontal alignment from a Layout.alignment value.
+   * Qt flags: AlignLeft=1, AlignRight=2, AlignHCenter=4.
+   * Returns 'left' | 'right' | 'hcenter'.
+   */
+  static _alignH(align) {
+    if (align === 'AlignRight'   || align === 'Qt.AlignRight'   || (typeof align === 'number' && (align & 2)))  return 'right';
+    if (align === 'AlignHCenter' || align === 'Qt.AlignHCenter' || (typeof align === 'number' && (align & 4)))  return 'hcenter';
+    return 'left';
+  }
+
+  /**
+   * Decode vertical alignment from a Layout.alignment value.
+   * Qt flags: AlignTop=32, AlignBottom=64, AlignVCenter=128.
+   * Returns 'top' | 'bottom' | 'vcenter'.
+   */
+  static _alignV(align) {
+    if (align === 'AlignBottom' || align === 'Qt.AlignBottom' || (typeof align === 'number' && (align & 64)))  return 'bottom';
+    if (align === 'AlignVCenter'|| align === 'Qt.AlignVCenter'|| (typeof align === 'number' && (align & 128))) return 'vcenter';
+    return 'top';
+  }
+
+  // ------------------------------------------------------------------
+  // Fill distribution helper
+  // ------------------------------------------------------------------
+
+  /**
+   * Distribute `available` pixels among `items` that have a fill flag set.
+   * Each item has { allocSize, minSize, maxSize, fill }.
+   * Returns nothing; modifies allocSize in-place.
+   */
+  static _distributeFill(available, items) {
+    let toFill = items.filter((d) => d.fill);
+    let remain = available;
+    while (toFill.length > 0 && remain > 0) {
+      const share = remain / toFill.length;
+      const capped   = [];
+      const uncapped = [];
+      for (const d of toFill) {
+        const clamped = Math.max(d.minSize, Math.min(d.maxSize, share));
+        if (clamped < share - _FILL_EPSILON) {
+          capped.push(d);
+          d.allocSize = clamped;
+        } else {
+          uncapped.push(d);
+        }
+      }
+      if (capped.length === 0) {
+        for (const d of uncapped) d.allocSize = Math.max(d.minSize, Math.min(d.maxSize, share));
+        break;
+      }
+      remain -= capped.reduce((s, d) => s + d.allocSize, 0);
+      toFill = uncapped;
+    }
+    if (toFill.length > 0 && remain <= 0) {
+      for (const d of toFill) d.allocSize = d.minSize;
+    }
+  }
+
+  // ------------------------------------------------------------------
+  // Child tracking
+  // ------------------------------------------------------------------
+
+  _watchChild(child) {
+    if (!(child instanceof Item)) return;
+    if (this._childDisconnectors.has(child)) return;
+
+    const schedule = () => this._scheduleLayout();
+    const disconnectors = [];
+    for (const prop of ['width', 'height', 'implicitWidth', 'implicitHeight', 'visible']) {
+      const sig = child[`${prop}Changed`];
+      if (sig && typeof sig.connect === 'function') {
+        disconnectors.push(sig.connect(schedule));
+      }
+    }
+    this._childDisconnectors.set(child, disconnectors);
+  }
+
+  _unwatchChild(child) {
+    const disconnectors = this._childDisconnectors.get(child);
+    if (!disconnectors) return;
+    for (const d of disconnectors) {
+      if (typeof d === 'function') d();
+    }
+    this._childDisconnectors.delete(child);
+  }
+
+  _addChildItem(child) {
+    super._addChildItem(child);
+    this._watchChild(child);
+    this._scheduleLayout();
+  }
+
+  _removeChildItem(child) {
+    this._unwatchChild(child);
+    super._removeChildItem(child);
+    this._scheduleLayout();
+  }
+
+  _scheduleLayout() {
+    if (this._layoutScheduled) return;
+    this._layoutScheduled = true;
+    Promise.resolve().then(() => {
+      this._layoutScheduled = false;
+      this._doLayout();
+    });
+  }
+
+  _doLayout() {}
+
+  _layoutChildren() {
+    return this._childItems.filter((c) => c.visible !== false);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// RowLayout
+// ---------------------------------------------------------------------------
+
+class RowLayout extends LayoutContainer {
+  _doLayout() {
+    const children = this._layoutChildren();
+    const spacing  = this.spacing || 0;
+    const pt = this._pt(), pb = this._pb(), pl = this._pl(), pr = this._pr();
+    const containerW = this.width  || 0;
+    const containerH = this.height || 0;
+    const availW = containerW - pl - pr;
+    const availH = containerH - pt - pb;
+
+    if (children.length === 0) {
+      this.implicitWidth  = pl + pr;
+      this.implicitHeight = pt + pb;
+      return;
+    }
+
+    // Build per-child layout data
+    const data = children.map((child) => {
+      const la   = LayoutContainer._la(child);
+      const lm   = LayoutContainer._leftMargin(la);
+      const rm   = LayoutContainer._rightMargin(la);
+      const tm   = LayoutContainer._topMargin(la);
+      const bm   = LayoutContainer._bottomMargin(la);
+      const prefW = LayoutContainer._prefW(child, la);
+      const minW  = LayoutContainer._minW(la);
+      const maxW  = LayoutContainer._maxW(la);
+      const prefH = LayoutContainer._prefH(child, la);
+      const minH  = LayoutContainer._minH(la);
+      const maxH  = LayoutContainer._maxH(la);
+      return {
+        child, la, lm, rm, tm, bm,
+        prefW, minW, maxW,
+        prefH, minH, maxH,
+        fill:     !!la.fillWidth,
+        fillH:    !!la.fillHeight,
+        align:    la.alignment,
+        allocSize: Math.max(minW, Math.min(maxW, prefW)),
+        minSize:   minW,
+        maxSize:   maxW,
+      };
+    });
+
+    // Total fixed horizontal consumption (margins + inter-item spacing)
+    const totalMarginH = data.reduce((s, d) => s + d.lm + d.rm, 0);
+    const totalSpacing = spacing * (children.length - 1);
+    const sumNonFill   = data.filter((d) => !d.fill).reduce((s, d) => s + d.allocSize, 0);
+    const fillAvail    = availW - totalMarginH - totalSpacing - sumNonFill;
+
+    LayoutContainer._distributeFill(fillAvail, data);
+
+    // Place children left-to-right
+    let cursor = pl;
+    let maxH    = 0;
+
+    for (let i = 0; i < data.length; i++) {
+      const d = data[i];
+      cursor += d.lm;
+
+      const w = d.allocSize;
+
+      // Compute child height
+      let h;
+      if (d.fillH && availH > 0) {
+        h = Math.max(d.minH, Math.min(d.maxH, availH - d.tm - d.bm));
+      } else {
+        h = Math.max(d.minH, Math.min(d.maxH, d.prefH));
+      }
+
+      d.child.width  = w;
+      d.child.height = h;
+
+      // Vertical position
+      // RowLayout default is vcenter (Qt Quick Layouts behaviour).
+      // Explicit alignment overrides only when the alignment value is defined.
+      let cy;
+      if (availH > 0) {
+        const itemTotalH = h + d.tm + d.bm;
+        // When no alignment is specified, RowLayout centres items vertically.
+        const av = d.align !== undefined ? LayoutContainer._alignV(d.align) : 'vcenter';
+        if (av === 'bottom') {
+          cy = pt + availH - d.bm - h;
+        } else if (av === 'top') {
+          cy = pt + d.tm;
+        } else {
+          // vcenter
+          cy = pt + d.tm + Math.max(0, (availH - itemTotalH) / 2);
+        }
+      } else {
+        cy = pt + d.tm;
+      }
+
+      d.child.x = cursor;
+      d.child.y = cy;
+
+      const childHWithMargins = h + d.tm + d.bm;
+      if (childHWithMargins > maxH) maxH = childHWithMargins;
+
+      cursor += w + d.rm;
+      if (i < data.length - 1) cursor += spacing;
+    }
+
+    this.implicitWidth  = cursor + pr;
+    this.implicitHeight = pt + maxH + pb;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// ColumnLayout
+// ---------------------------------------------------------------------------
+
+class ColumnLayout extends LayoutContainer {
+  _doLayout() {
+    const children = this._layoutChildren();
+    const spacing  = this.spacing || 0;
+    const pt = this._pt(), pb = this._pb(), pl = this._pl(), pr = this._pr();
+    const containerW = this.width  || 0;
+    const containerH = this.height || 0;
+    const availW = containerW - pl - pr;
+    const availH = containerH - pt - pb;
+
+    if (children.length === 0) {
+      this.implicitWidth  = pl + pr;
+      this.implicitHeight = pt + pb;
+      return;
+    }
+
+    const data = children.map((child) => {
+      const la   = LayoutContainer._la(child);
+      const lm   = LayoutContainer._leftMargin(la);
+      const rm   = LayoutContainer._rightMargin(la);
+      const tm   = LayoutContainer._topMargin(la);
+      const bm   = LayoutContainer._bottomMargin(la);
+      const prefH = LayoutContainer._prefH(child, la);
+      const minH  = LayoutContainer._minH(la);
+      const maxH  = LayoutContainer._maxH(la);
+      const prefW = LayoutContainer._prefW(child, la);
+      const minW  = LayoutContainer._minW(la);
+      const maxW  = LayoutContainer._maxW(la);
+      return {
+        child, la, lm, rm, tm, bm,
+        prefH, minH, maxH,
+        prefW, minW, maxW,
+        fill:     !!la.fillHeight,
+        fillW:    !!la.fillWidth,
+        align:    la.alignment,
+        allocSize: Math.max(minH, Math.min(maxH, prefH)),
+        minSize:   minH,
+        maxSize:   maxH,
+      };
+    });
+
+    const totalMarginV = data.reduce((s, d) => s + d.tm + d.bm, 0);
+    const totalSpacing = spacing * (children.length - 1);
+    const sumNonFill   = data.filter((d) => !d.fill).reduce((s, d) => s + d.allocSize, 0);
+    const fillAvail    = availH - totalMarginV - totalSpacing - sumNonFill;
+
+    LayoutContainer._distributeFill(fillAvail, data);
+
+    let cursor = pt;
+    let maxW    = 0;
+
+    for (let i = 0; i < data.length; i++) {
+      const d = data[i];
+      cursor += d.tm;
+
+      const h = d.allocSize;
+
+      // Compute child width
+      let w;
+      if (d.fillW && availW > 0) {
+        w = Math.max(d.minW, Math.min(d.maxW, availW - d.lm - d.rm));
+      } else {
+        w = Math.max(d.minW, Math.min(d.maxW, d.prefW));
+      }
+
+      d.child.width  = w;
+      d.child.height = h;
+
+      // Horizontal position (default: left)
+      let cx;
+      if (availW > 0) {
+        const itemTotalW = w + d.lm + d.rm;
+        const ah = LayoutContainer._alignH(d.align);
+        if (ah === 'right') {
+          cx = pl + availW - d.rm - w;
+        } else if (ah === 'hcenter') {
+          cx = pl + d.lm + Math.max(0, (availW - itemTotalW) / 2);
+        } else {
+          // left (default)
+          cx = pl + d.lm;
+        }
+      } else {
+        cx = pl + d.lm;
+      }
+
+      d.child.x = cx;
+      d.child.y = cursor;
+
+      const childWWithMargins = w + d.lm + d.rm;
+      if (childWWithMargins > maxW) maxW = childWWithMargins;
+
+      cursor += h + d.bm;
+      if (i < data.length - 1) cursor += spacing;
+    }
+
+    this.implicitWidth  = pl + maxW + pr;
+    this.implicitHeight = cursor + pb;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// GridLayout
+// ---------------------------------------------------------------------------
+
+class GridLayout extends LayoutContainer {
+  constructor(options = {}) {
+    super(options);
+    // columns / rows: 0 means "auto"
+    this.defineProperty('columns', 0, { onChanged: () => this._scheduleLayout() });
+    this.defineProperty('rows',    0, { onChanged: () => this._scheduleLayout() });
+    // columnSpacing / rowSpacing: undefined means use spacing
+    this.defineProperty('rowSpacing',    undefined, { onChanged: () => this._scheduleLayout() });
+    this.defineProperty('columnSpacing', undefined, { onChanged: () => this._scheduleLayout() });
+    // flow: 'LeftToRight' | 'TopToBottom'
+    this.defineProperty('flow', 'LeftToRight', { onChanged: () => this._scheduleLayout() });
+    this.defineProperty('layoutDirection', 'LeftToRight', { onChanged: () => this._scheduleLayout() });
+  }
+
+  _colSpacing() { return this.columnSpacing !== undefined ? this.columnSpacing : (this.spacing || 0); }
+  _rowSpacing() { return this.rowSpacing    !== undefined ? this.rowSpacing    : (this.spacing || 0); }
+
+  _doLayout() {
+    const children  = this._layoutChildren();
+    const pt = this._pt(), pb = this._pb(), pl = this._pl(), pr = this._pr();
+    const colSpc     = this._colSpacing();
+    const rowSpc     = this._rowSpacing();
+    const containerW = this.width  || 0;
+    const containerH = this.height || 0;
+    const availW = containerW - pl - pr;
+    const availH = containerH - pt - pb;
+
+    if (children.length === 0) {
+      this.implicitWidth  = pl + pr;
+      this.implicitHeight = pt + pb;
+      return;
+    }
+
+    const numColsSpec = this.columns || 0;
+    const numRowsSpec = this.rows    || 0;
+    const flowIsLTR   = (this.flow !== 'TopToBottom');
+
+    // Collect per-child info
+    const items = children.map((child) => {
+      const la = LayoutContainer._la(child);
+      return {
+        child, la,
+        row:     (la.row     !== undefined) ? la.row     : -1,
+        col:     (la.column  !== undefined) ? la.column  : -1,
+        rowSpan: (la.rowSpan !== undefined) ? la.rowSpan : 1,
+        colSpan: (la.columnSpan !== undefined) ? la.columnSpan : 1,
+        lm: LayoutContainer._leftMargin(la),
+        rm: LayoutContainer._rightMargin(la),
+        tm: LayoutContainer._topMargin(la),
+        bm: LayoutContainer._bottomMargin(la),
+        prefW: LayoutContainer._prefW(child, la),
+        minW:  LayoutContainer._minW(la),
+        maxW:  LayoutContainer._maxW(la),
+        prefH: LayoutContainer._prefH(child, la),
+        minH:  LayoutContainer._minH(la),
+        maxH:  LayoutContainer._maxH(la),
+        fillW: !!la.fillWidth,
+        fillH: !!la.fillHeight,
+        align: la.alignment,
+      };
+    });
+
+    // ------------------------------------------------------------------
+    // Auto-placement: assign row/col to items without explicit positions
+    // ------------------------------------------------------------------
+    const occupied   = new Set();
+    const isOccupied = (r, c) => occupied.has(`${r},${c}`);
+    const occupy     = (r, c, rs, cs) => {
+      for (let rr = r; rr < r + rs; rr++)
+        for (let cc = c; cc < c + cs; cc++)
+          occupied.add(`${rr},${cc}`);
+    };
+
+    // Place explicitly-positioned items first
+    for (const it of items) {
+      if (it.row >= 0 && it.col >= 0) {
+        occupy(it.row, it.col, it.rowSpan, it.colSpan);
+      }
+    }
+
+    // Auto-place the rest
+    let autoRow = 0, autoCol = 0;
+    for (const it of items) {
+      if (it.row >= 0 && it.col >= 0) continue;
+
+      // Find next free cell
+      // eslint-disable-next-line no-constant-condition
+      while (true) {
+        if (!isOccupied(autoRow, autoCol)) {
+          // Check if the span fits without hitting an occupied cell
+          let fits = true;
+          for (let rr = autoRow; rr < autoRow + it.rowSpan && fits; rr++)
+            for (let cc = autoCol; cc < autoCol + it.colSpan && fits; cc++)
+              if (isOccupied(rr, cc)) fits = false;
+          if (fits) break;
+        }
+        // Advance cursor
+        if (flowIsLTR) {
+          autoCol++;
+          if (numColsSpec > 0 && autoCol >= numColsSpec) { autoCol = 0; autoRow++; }
+        } else {
+          autoRow++;
+          if (numRowsSpec > 0 && autoRow >= numRowsSpec) { autoRow = 0; autoCol++; }
+        }
+      }
+
+      it.row = autoRow;
+      it.col = autoCol;
+      occupy(autoRow, autoCol, it.rowSpan, it.colSpan);
+
+      // Advance cursor past the placed item
+      if (flowIsLTR) {
+        autoCol += it.colSpan;
+        if (numColsSpec > 0 && autoCol >= numColsSpec) { autoCol = 0; autoRow++; }
+      } else {
+        autoRow += it.rowSpan;
+        if (numRowsSpec > 0 && autoRow >= numRowsSpec) { autoRow = 0; autoCol++; }
+      }
+    }
+
+    // ------------------------------------------------------------------
+    // Determine grid dimensions
+    // ------------------------------------------------------------------
+    let gridRows = 0, gridCols = 0;
+    for (const it of items) {
+      gridRows = Math.max(gridRows, it.row + it.rowSpan);
+      gridCols = Math.max(gridCols, it.col + it.colSpan);
+    }
+
+    // ------------------------------------------------------------------
+    // Compute column widths and row heights from preferred sizes
+    // ------------------------------------------------------------------
+    const colW    = new Float64Array(gridCols);
+    const rowH    = new Float64Array(gridRows);
+    const colFill = new Uint8Array(gridCols);
+    const rowFill = new Uint8Array(gridRows);
+
+    for (const it of items) {
+      if (it.colSpan === 1) {
+        const pw = Math.max(it.minW, Math.min(it.maxW, it.prefW)) + it.lm + it.rm;
+        if (pw > colW[it.col]) colW[it.col] = pw;
+        if (it.fillW) colFill[it.col] = 1;
+      }
+      if (it.rowSpan === 1) {
+        const ph = Math.max(it.minH, Math.min(it.maxH, it.prefH)) + it.tm + it.bm;
+        if (ph > rowH[it.row]) rowH[it.row] = ph;
+        if (it.fillH) rowFill[it.row] = 1;
+      }
+    }
+
+    // Distribute extra space to fill columns/rows when container is larger
+    if (availW > 0) {
+      const usedW = Array.from(colW).reduce((s, w) => s + w, 0) + colSpc * (gridCols - 1);
+      const extra = availW - usedW;
+      if (extra > 0) {
+        const nFill = Array.from(colFill).filter(Boolean).length;
+        if (nFill > 0) {
+          const share = extra / nFill;
+          for (let c = 0; c < gridCols; c++) if (colFill[c]) colW[c] += share;
+        }
+      }
+    }
+    if (availH > 0) {
+      const usedH = Array.from(rowH).reduce((s, h) => s + h, 0) + rowSpc * (gridRows - 1);
+      const extra = availH - usedH;
+      if (extra > 0) {
+        const nFill = Array.from(rowFill).filter(Boolean).length;
+        if (nFill > 0) {
+          const share = extra / nFill;
+          for (let r = 0; r < gridRows; r++) if (rowFill[r]) rowH[r] += share;
+        }
+      }
+    }
+
+    // ------------------------------------------------------------------
+    // Compute cumulative offsets
+    // ------------------------------------------------------------------
+    const colOffsets = new Float64Array(gridCols);
+    const rowOffsets = new Float64Array(gridRows);
+    let cx = pl, cy = pt;
+    for (let c = 0; c < gridCols; c++) { colOffsets[c] = cx; cx += colW[c] + colSpc; }
+    for (let r = 0; r < gridRows; r++) { rowOffsets[r] = cy; cy += rowH[r] + rowSpc; }
+
+    // ------------------------------------------------------------------
+    // Place items
+    // ------------------------------------------------------------------
+    for (const it of items) {
+      const cellX = colOffsets[it.col];
+      const cellY = rowOffsets[it.row];
+
+      // Cell extents for spanning items
+      const cellW = it.colSpan === 1
+        ? colW[it.col]
+        : Array.from({ length: it.colSpan }, (_, i) => colW[it.col + i]).reduce((s, w) => s + w, 0) + colSpc * (it.colSpan - 1);
+      const cellH = it.rowSpan === 1
+        ? rowH[it.row]
+        : Array.from({ length: it.rowSpan }, (_, i) => rowH[it.row + i]).reduce((s, h) => s + h, 0) + rowSpc * (it.rowSpan - 1);
+
+      // Item dimensions
+      const itemW = it.fillW
+        ? Math.max(it.minW, Math.min(it.maxW, cellW - it.lm - it.rm))
+        : Math.max(it.minW, Math.min(it.maxW, it.prefW));
+      const itemH = it.fillH
+        ? Math.max(it.minH, Math.min(it.maxH, cellH - it.tm - it.bm))
+        : Math.max(it.minH, Math.min(it.maxH, it.prefH));
+
+      it.child.width  = itemW;
+      it.child.height = itemH;
+
+      // Horizontal alignment
+      const ah = LayoutContainer._alignH(it.align);
+      let ix;
+      if (ah === 'right') {
+        ix = cellX + cellW - it.rm - itemW;
+      } else if (ah === 'hcenter') {
+        ix = cellX + it.lm + Math.max(0, (cellW - it.lm - it.rm - itemW) / 2);
+      } else {
+        ix = cellX + it.lm;
+      }
+
+      // Vertical alignment
+      const av = LayoutContainer._alignV(it.align);
+      let iy;
+      if (av === 'bottom') {
+        iy = cellY + cellH - it.bm - itemH;
+      } else if (av === 'vcenter') {
+        iy = cellY + it.tm + Math.max(0, (cellH - it.tm - it.bm - itemH) / 2);
+      } else {
+        iy = cellY + it.tm;
+      }
+
+      it.child.x = ix;
+      it.child.y = iy;
+    }
+
+    // Update implicit size (based on preferred/minimum sizes, not container size)
+    const totalW = Array.from(colW).reduce((s, w) => s + w, 0) + colSpc * Math.max(0, gridCols - 1);
+    const totalH = Array.from(rowH).reduce((s, h) => s + h, 0) + rowSpc * Math.max(0, gridRows - 1);
+    this.implicitWidth  = pl + totalW + pr;
+    this.implicitHeight = pt + totalH + pb;
+  }
+}
+
 const runtimeExports = {
   Signal,
   Binding,
@@ -4954,6 +5600,11 @@ const runtimeExports = {
   Row,
   Column,
   Flow,
+  // QtQuick.Layouts
+  LayoutContainer,
+  RowLayout,
+  ColumnLayout,
+  GridLayout,
 };
 
 if (typeof module !== 'undefined' && module.exports) {

@@ -415,13 +415,29 @@ Output:
   - `Column { spacing: 5; … }` – vertical positioner
   - `Flow { spacing: 5; … }` – wrapping positioner (LeftToRight / TopToBottom)
   - All positioners support `padding`, `topPadding`, `bottomPadding`, `leftPadding`, `rightPadding`, `layoutDirection`
+- **QtQuick.Layouts** (`import QtQuick.Layouts 1.15`)
+  - `RowLayout { spacing: 8; … }` – distributes space horizontally; children use `Layout.*` attached properties
+  - `ColumnLayout { spacing: 4; … }` – distributes space vertically
+  - `GridLayout { columns: 3; columnSpacing: 8; rowSpacing: 8; … }` – two-dimensional grid
+  - Supported `Layout.*` attached properties on children:
+    - `Layout.fillWidth: true` / `Layout.fillHeight: true` – child stretches to fill available space; remaining space is shared equally among all fill children (max/min clamped)
+    - `Layout.preferredWidth: N` / `Layout.preferredHeight: N` – override implicit/explicit size as the preferred size
+    - `Layout.minimumWidth: N` / `Layout.minimumHeight: N` – lower bound during fill distribution
+    - `Layout.maximumWidth: N` / `Layout.maximumHeight: N` – upper bound during fill distribution
+    - `Layout.alignment: Qt.AlignHCenter | Qt.AlignTop` – per-child alignment within its cell/lane; accepts `Qt.Align*` flags (bitwise) or `'AlignHCenter'` / `'AlignRight'` / `'AlignBottom'` / `'AlignVCenter'` strings
+    - `Layout.margins: N` – uniform margin around child (reduces the space it occupies and offsets its position); per-side variants `Layout.leftMargin`, `Layout.rightMargin`, `Layout.topMargin`, `Layout.bottomMargin`
+  - `GridLayout`-specific attached properties: `Layout.row`, `Layout.column` (explicit cell placement), `Layout.rowSpan`, `Layout.columnSpan`
+  - Container properties: `padding` / `topPadding` / `bottomPadding` / `leftPadding` / `rightPadding`
+  - `RowLayout` default vertical alignment is vcenter (matching Qt Quick Layouts); `ColumnLayout` default horizontal alignment is left
+  - Reactivity: re-layout runs as a microtask whenever the container's width/height changes, or when children are added/removed, or when a child's `width`/`height`/`implicitWidth`/`implicitHeight`/`visible` changes
+  - **Limitations**: `Layout.*` binding changes at runtime do not yet trigger a re-layout (initial value is applied); spanning items do not currently expand column/row tracks beyond single-span preferred sizes
 - **QML compatibility layer (attached properties, grouped blocks, enums)**
   - **Attached properties** – registry-driven dispatch via `__ATTACHED_HANDLERS` in `tools/jqmlc/lib/codegen.js`
     - `Component.onCompleted: { … }` – handler runs after the component tree is fully created (correct `this` binding, QML id scope access)
     - `Component.onDestruction: { … }` – handler fires when the object is destroyed
     - `Keys.onPressed: { … }` / `Keys.onReleased: { … }` / `Keys.onReturnPressed: { … }` / `Keys.onEscapePressed: { … }` – migrated to registry, same behaviour as before
-    - `Layout.fillWidth: true` / `Layout.fillHeight: true` / `Layout.preferredWidth: N` / … – stored in `object.__layoutAttached` for use by future RowLayout/ColumnLayout
-    - `import QtQuick.Layouts 1.15` is recognised without error
+    - `Layout.fillWidth: true` / `Layout.fillHeight: true` / `Layout.preferredWidth: N` / … – stored in `object.__layoutAttached` and acted on at runtime by `RowLayout`, `ColumnLayout`, and `GridLayout`
+    - `import QtQuick.Layouts 1.15` is recognised; exports `RowLayout`, `ColumnLayout`, `GridLayout`
     - _Extend:_ add a new entry to `__ATTACHED_HANDLERS` in `codegen.js` to support further attached types (e.g. `ScrollBar.policy`, `Accessible.role`)
   - **Grouped property blocks** – `border { … }` and `font { … }` object-block syntax
     - `border { color: "navy"; width: 2 }` – expanded to `borderColor` / `borderWidth` on parent `Rectangle`
