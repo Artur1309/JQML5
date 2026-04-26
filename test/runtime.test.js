@@ -1403,3 +1403,319 @@ test('DragHandler grab continues after pointer leaves original position', () => 
   assert.equal(handler.translation.x, 200);
   assert.equal(handler.translation.y, 200);
 });
+
+// ---------------------------------------------------------------------------
+// Stage D: Controls MVP
+// ---------------------------------------------------------------------------
+
+const { Button, Label, TextField, Slider, CheckBox, Theme } = require('../src/runtime');
+
+test('Button emits clicked on pointer up inside bounds', () => {
+  const root = new Item();
+  root.width = 200;
+  root.height = 200;
+
+  const btn = new Button({ parentItem: root });
+  btn.x = 10; btn.y = 10;
+  btn.width = 100; btn.height = 36;
+  btn.text = 'OK';
+
+  let clickCount = 0;
+  btn.clicked.connect(() => { clickCount += 1; });
+
+  const scene = new Scene({ rootItem: root });
+  scene.dispatchPointer('down', 50, 28);
+  scene.dispatchPointer('up', 50, 28);
+
+  assert.equal(clickCount, 1);
+});
+
+test('Button does not emit clicked when released outside bounds', () => {
+  const root = new Item();
+  root.width = 200;
+  root.height = 200;
+
+  const btn = new Button({ parentItem: root });
+  btn.x = 10; btn.y = 10;
+  btn.width = 100; btn.height = 36;
+
+  let clickCount = 0;
+  btn.clicked.connect(() => { clickCount += 1; });
+
+  const scene = new Scene({ rootItem: root });
+  scene.dispatchPointer('down', 50, 28);
+  scene.dispatchPointer('up', 200, 200); // released outside
+
+  assert.equal(clickCount, 0);
+});
+
+test('Button emits clicked via Enter key when focused', () => {
+  const root = new Item();
+  root.width = 200;
+  root.height = 200;
+
+  const btn = new Button({ parentItem: root });
+  btn.x = 10; btn.y = 10;
+  btn.width = 100; btn.height = 36;
+
+  let clickCount = 0;
+  btn.clicked.connect(() => { clickCount += 1; });
+
+  const scene = new Scene({ rootItem: root });
+  scene.forceActiveFocus(btn);
+
+  scene.dispatchKey('pressed', { key: 'Enter' });
+  assert.equal(clickCount, 1);
+
+  scene.dispatchKey('pressed', { key: ' ' });
+  assert.equal(clickCount, 2);
+});
+
+test('Button keyboard activation is disabled when enabled=false', () => {
+  const root = new Item();
+  root.width = 200;
+  root.height = 200;
+
+  const btn = new Button({ parentItem: root });
+  btn.x = 0; btn.y = 0;
+  btn.width = 100; btn.height = 36;
+  btn.enabled = false;
+
+  let clickCount = 0;
+  btn.clicked.connect(() => { clickCount += 1; });
+
+  const scene = new Scene({ rootItem: root });
+  scene.forceActiveFocus(btn);
+  scene.dispatchKey('pressed', { key: 'Enter' });
+
+  assert.equal(clickCount, 0);
+});
+
+test('Button auto-acquires focus on pointer down', () => {
+  const root = new Item();
+  root.width = 200;
+  root.height = 200;
+
+  const btn = new Button({ parentItem: root });
+  btn.x = 0; btn.y = 0;
+  btn.width = 100; btn.height = 36;
+
+  const scene = new Scene({ rootItem: root });
+  assert.equal(scene.activeFocusItem, null);
+
+  scene.dispatchPointer('down', 50, 18);
+  assert.equal(scene.activeFocusItem, btn);
+});
+
+test('Button pressed state tracks pointer down/up', () => {
+  const root = new Item();
+  root.width = 200;
+  root.height = 200;
+
+  const btn = new Button({ parentItem: root });
+  btn.x = 0; btn.y = 0;
+  btn.width = 100; btn.height = 36;
+
+  const scene = new Scene({ rootItem: root });
+
+  assert.equal(btn.pressed, false);
+  scene.dispatchPointer('down', 50, 18);
+  assert.equal(btn.pressed, true);
+  scene.dispatchPointer('up', 50, 18);
+  assert.equal(btn.pressed, false);
+});
+
+test('CheckBox toggles checked on pointer click', () => {
+  const root = new Item();
+  root.width = 200;
+  root.height = 200;
+
+  const cb = new CheckBox({ parentItem: root });
+  cb.x = 0; cb.y = 0;
+  cb.width = 100; cb.height = 24;
+  cb.text = 'Option';
+
+  assert.equal(cb.checked, false);
+
+  const scene = new Scene({ rootItem: root });
+  scene.dispatchPointer('down', 50, 12);
+  scene.dispatchPointer('up', 50, 12);
+
+  assert.equal(cb.checked, true);
+
+  scene.dispatchPointer('down', 50, 12);
+  scene.dispatchPointer('up', 50, 12);
+
+  assert.equal(cb.checked, false);
+});
+
+test('CheckBox emits clicked signal on toggle', () => {
+  const root = new Item();
+  root.width = 200;
+  root.height = 200;
+
+  const cb = new CheckBox({ parentItem: root });
+  cb.x = 0; cb.y = 0;
+  cb.width = 100; cb.height = 24;
+
+  let clicks = 0;
+  cb.clicked.connect(() => { clicks += 1; });
+
+  const scene = new Scene({ rootItem: root });
+  scene.dispatchPointer('down', 50, 12);
+  scene.dispatchPointer('up', 50, 12);
+
+  assert.equal(clicks, 1);
+});
+
+test('CheckBox toggles via Space/Enter keyboard when focused', () => {
+  const root = new Item();
+  root.width = 200;
+  root.height = 200;
+
+  const cb = new CheckBox({ parentItem: root });
+  cb.x = 0; cb.y = 0;
+  cb.width = 100; cb.height = 24;
+
+  const scene = new Scene({ rootItem: root });
+  scene.forceActiveFocus(cb);
+
+  assert.equal(cb.checked, false);
+  scene.dispatchKey('pressed', { key: ' ' });
+  assert.equal(cb.checked, true);
+  scene.dispatchKey('pressed', { key: 'Enter' });
+  assert.equal(cb.checked, false);
+});
+
+test('Slider clamps value to [from, to] range', () => {
+  const slider = new Slider();
+  slider.from = 0;
+  slider.to = 100;
+
+  assert.equal(slider._clamp(-10), 0);
+  assert.equal(slider._clamp(150), 100);
+  assert.equal(slider._clamp(50), 50);
+});
+
+test('Slider stepSize snaps value', () => {
+  const slider = new Slider();
+  slider.from = 0;
+  slider.to = 10;
+  slider.stepSize = 2;
+
+  assert.equal(slider._clamp(3), 4);   // rounds to nearest step (4)
+  assert.equal(slider._clamp(5), 6);   // rounds to nearest step (6)
+  assert.equal(slider._clamp(1.1), 2); // rounds up to step 2
+});
+
+test('Slider drag math: value computed from pointer position', () => {
+  const root = new Item();
+  root.width = 300;
+  root.height = 100;
+
+  const slider = new Slider({ parentItem: root });
+  slider.x = 0; slider.y = 0;
+  slider.width = 200;
+  slider.height = 24;
+  slider.from = 0;
+  slider.to = 1;
+  slider.stepSize = 0;
+
+  const scene = new Scene({ rootItem: root });
+  // Track goes from x=12 to x=188; click exactly in the middle => x=100 => pos=(100-12)/(188-12)=0.5
+  scene.dispatchPointer('down', 100, 12);
+  const expected = slider._clamp(slider.from + 0.5 * (slider.to - slider.from));
+  assert.ok(Math.abs(slider.value - expected) < 0.01,
+    `Expected value ≈ ${expected}, got ${slider.value}`);
+});
+
+test('Slider adjusts value via arrow keys when focused', () => {
+  const root = new Item();
+  root.width = 300;
+  root.height = 100;
+
+  const slider = new Slider({ parentItem: root });
+  slider.x = 0; slider.y = 0;
+  slider.width = 200; slider.height = 24;
+  slider.from = 0; slider.to = 10;
+  slider.stepSize = 1;
+  slider.value = 5;
+
+  const scene = new Scene({ rootItem: root });
+  scene.forceActiveFocus(slider);
+
+  scene.dispatchKey('pressed', { key: 'ArrowRight' });
+  assert.equal(slider.value, 6);
+
+  scene.dispatchKey('pressed', { key: 'ArrowLeft' });
+  assert.equal(slider.value, 5);
+});
+
+test('TextField accepts text input when focused', () => {
+  const root = new Item();
+  root.width = 300;
+  root.height = 100;
+
+  const tf = new TextField({ parentItem: root });
+  tf.x = 0; tf.y = 0;
+  tf.width = 200; tf.height = 32;
+  tf.placeholderText = 'Type here';
+
+  const textChanges = [];
+  tf.textChanged.connect((val) => { textChanges.push(val); });
+
+  const scene = new Scene({ rootItem: root });
+  scene.forceActiveFocus(tf);
+
+  scene.dispatchKey('pressed', { key: 'H' });
+  scene.dispatchKey('pressed', { key: 'i' });
+
+  assert.equal(tf.text, 'Hi');
+  assert.deepEqual(textChanges, ['H', 'Hi']);
+});
+
+test('TextField Backspace removes last character', () => {
+  const root = new Item();
+  root.width = 300;
+  root.height = 100;
+
+  const tf = new TextField({ parentItem: root, text: 'abc' });
+  tf.x = 0; tf.y = 0;
+  tf.width = 200; tf.height = 32;
+
+  const scene = new Scene({ rootItem: root });
+  scene.forceActiveFocus(tf);
+
+  scene.dispatchKey('pressed', { key: 'Backspace' });
+  assert.equal(tf.text, 'ab');
+});
+
+test('TextField requires focus for text input', () => {
+  const root = new Item();
+  root.width = 300;
+  root.height = 100;
+
+  const tf = new TextField({ parentItem: root });
+  tf.x = 0; tf.y = 0;
+  tf.width = 200; tf.height = 32;
+  // No focus given
+
+  const scene = new Scene({ rootItem: root });
+  scene.dispatchKey('pressed', { key: 'A' });
+
+  assert.equal(tf.text, ''); // no input without focus
+});
+
+test('Theme object exposes palette and font', () => {
+  assert.ok(typeof Theme.palette === 'object');
+  assert.ok(typeof Theme.palette.primary === 'string');
+  assert.ok(typeof Theme.font === 'object');
+  assert.ok(typeof Theme.font.pixelSize === 'number');
+});
+
+test('Label is an Item with text/color/font properties', () => {
+  const label = new Label({ text: 'Hello', color: '#ff0000' });
+  assert.equal(label.text, 'Hello');
+  assert.equal(label.color, '#ff0000');
+  assert.ok(typeof label.font === 'object');
+});
