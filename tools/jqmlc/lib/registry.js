@@ -62,6 +62,8 @@ const RUNTIME_TYPES = [
   ['Behavior', { kind: 'runtime', runtimeExport: 'Behavior', category: 'quick-states' }],
   // Stage B: text
   ['Text', { kind: 'runtime', runtimeExport: 'Text', category: 'quick', isItem: true }],
+  // Stage F: TextInput
+  ['TextInput', { kind: 'runtime', runtimeExport: 'TextInput', category: 'quick', isItem: true }],
   // Stage B: models / views
   ['ListElement', { kind: 'list-element', runtimeExport: 'ListElement', category: 'quick-model' }],
   ['ListModel', { kind: 'list-model', runtimeExport: 'ListModel', category: 'quick-model' }],
@@ -104,7 +106,7 @@ function createDefaultRegistries() {
   modules.registerModule('QtQuick', {
     listTypes: () => [
       'Item', 'Rectangle', 'MouseArea', 'Loader', 'CanvasRenderer', 'Scene',
-      'Text', 'Image',
+      'Text', 'TextInput', 'Image',
       'Animation', 'NumberAnimation', 'ColorAnimation', 'SequentialAnimation', 'ParallelAnimation',
       'PropertyChanges', 'State', 'Transition', 'Behavior',
       'ListElement', 'ListModel', 'Repeater', 'Flickable', 'ListView',

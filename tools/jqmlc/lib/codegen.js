@@ -459,6 +459,14 @@ const __ENUM_TABLE = {
   'Qt.AlignTop':     'top',
   'Qt.AlignVCenter': 'vcenter',
   'Qt.AlignBottom':  'bottom',
+  // TextInput echo modes
+  'TextInput.Normal':   'Normal',
+  'TextInput.Password': 'Password',
+  'TextInput.NoEcho':   'NoEcho',
+  // TextInput horizontal alignment (mirrors Text alignment)
+  'TextInput.AlignLeft':    'left',
+  'TextInput.AlignRight':   'right',
+  'TextInput.AlignHCenter': 'center',
 };
 const __exprCache = new Map();
 function __compileExpression(code) {

@@ -656,6 +656,62 @@ function _measureTextWidth(context, fontString, text) {
 }
 
 // ---------------------------------------------------------------------------
+// Text / TextInput value-normalization helpers
+// ---------------------------------------------------------------------------
+
+function _normalizeElide(v) {
+  if (!v) return 'none';
+  const s = String(v).toLowerCase();
+  if (s === 'elidenone' || s === 'none') return 'none';
+  if (s === 'elideright' || s === 'right') return 'right';
+  if (s === 'elideleft' || s === 'left') return 'left';
+  if (s === 'elidemiddle' || s === 'middle') return 'middle';
+  return 'none';
+}
+
+function _normalizeWrapMode(v) {
+  if (!v) return 'nowrap';
+  const s = String(v).toLowerCase();
+  if (s === 'wordwrap') return 'wordwrap';
+  if (s === 'wrapanywhere') return 'wrapanywhere';
+  return 'nowrap';
+}
+
+function _normalizeHAlign(v) {
+  if (!v) return 'left';
+  const s = String(v).toLowerCase();
+  if (s === 'center' || s === 'alignhcenter' || s === 'hcenter') return 'center';
+  if (s === 'right' || s === 'alignright') return 'right';
+  if (s === 'justify' || s === 'alignjustify') return 'justify';
+  return 'left';
+}
+
+function _normalizeVAlign(v) {
+  if (!v) return 'top';
+  const s = String(v).toLowerCase();
+  if (s === 'vcenter' || s === 'alignvcenter') return 'vcenter';
+  if (s === 'bottom' || s === 'alignbottom') return 'bottom';
+  return 'top';
+}
+
+/**
+ * Build a CSS font string from a font descriptor object.
+ * Shared by Text, TextInput and any other item that renders text.
+ *   @param {object} font - { family, pixelSize, bold, italic }
+ */
+function _buildFontString(font) {
+  const f = font || {};
+  const size = f.pixelSize || 14;
+  const family = f.family || 'sans-serif';
+  const bold = f.bold ? 'bold ' : '';
+  const italic = f.italic ? 'italic ' : '';
+  return `${italic}${bold}${size}px ${family}`;
+}
+
+/** Default blink interval (ms) for cursor in TextInput / TextField. */
+const _CURSOR_BLINK_INTERVAL = 500;
+
+// ---------------------------------------------------------------------------
 // Stage E: Image asset cache
 // ---------------------------------------------------------------------------
 
@@ -2795,43 +2851,184 @@ class Text extends Item {
     this.defineProperty('verticalAlignment', options.verticalAlignment ?? 'top');
     this.defineProperty('wrapMode', options.wrapMode ?? 'NoWrap');
     this.defineProperty('elide', options.elide ?? 'ElideNone');
+    this.defineProperty('lineHeight', options.lineHeight ?? 1.0);
+    this.defineProperty('lineHeightMode', options.lineHeightMode ?? 'ProportionalHeight');
+    this.defineProperty('maximumLineCount', options.maximumLineCount ?? 0);
+    this.defineProperty('textFormat', options.textFormat ?? 'PlainText');
+
+    // Line layout cache; invalidated when any relevant property changes.
+    this._lineCache = null;
+    this._lineCacheKey = null;
+
+    const invalidate = () => { this._lineCache = null; };
+    this.connect('textChanged', invalidate);
+    this.connect('fontChanged', invalidate);
+    this.connect('wrapModeChanged', invalidate);
+    this.connect('elideChanged', invalidate);
+    this.connect('maximumLineCountChanged', invalidate);
+    this.connect('widthChanged', invalidate);
   }
 
   /** Build a CSS font string from this item's font property. */
   _fontString() {
+    return _buildFontString(this.font);
+  }
+
+  /**
+   * Compute the array of visual text lines for the current properties.
+   * Requires a canvas context for text-width measurement.
+   */
+  _buildLines(context) {
+    const raw = String(this.text ?? '');
+    if (!raw) return [];
+
+    const fontString = this._fontString();
+    const wrapMode = _normalizeWrapMode(this.wrapMode);
+    const elide = _normalizeElide(this.elide);
+    const maxLines = this.maximumLineCount || 0;
+    const w = this.width || 0;
+
+    // Split on explicit newlines first
+    const paragraphs = raw.split('\n');
+    const lines = [];
+
+    for (const para of paragraphs) {
+      if (wrapMode === 'wordwrap' && w > 0) {
+        if (para === '') { lines.push(''); continue; }
+        const words = para.split(' ');
+        let cur = '';
+        for (const word of words) {
+          const candidate = cur ? cur + ' ' + word : word;
+          if (cur !== '' && _measureTextWidth(context, fontString, candidate) > w) {
+            lines.push(cur);
+            cur = word;
+          } else {
+            cur = candidate;
+          }
+        }
+        if (cur !== '') lines.push(cur);
+      } else if (wrapMode === 'wrapanywhere' && w > 0) {
+        if (para === '') { lines.push(''); continue; }
+        let remaining = para;
+        while (remaining.length > 0) {
+          if (_measureTextWidth(context, fontString, remaining) <= w) {
+            lines.push(remaining);
+            break;
+          }
+          // Binary search for the break point
+          let lo = 1;
+          let hi = remaining.length - 1;
+          while (lo < hi) {
+            const mid = (lo + hi + 1) >> 1;
+            if (_measureTextWidth(context, fontString, remaining.slice(0, mid)) <= w) {
+              lo = mid;
+            } else {
+              hi = mid - 1;
+            }
+          }
+          lines.push(remaining.slice(0, lo));
+          remaining = remaining.slice(lo);
+        }
+      } else {
+        // NoWrap
+        lines.push(para);
+      }
+    }
+
+    if (lines.length === 0) lines.push('');
+
+    // Apply maximumLineCount
+    const capped = maxLines > 0 && lines.length > maxLines;
+    if (capped) lines.splice(maxLines);
+
+    // Apply elide on the last visible line
+    if (elide !== 'none' && w > 0) {
+      const lastLine = lines[lines.length - 1];
+      const overflows = _measureTextWidth(context, fontString, lastLine) > w;
+      if (capped || overflows) {
+        if (elide === 'right') {
+          let truncated = lastLine;
+          while (truncated.length > 0 && _measureTextWidth(context, fontString, truncated + '\u2026') > w) {
+            truncated = truncated.slice(0, -1);
+          }
+          lines[lines.length - 1] = truncated + '\u2026';
+        }
+      }
+    }
+
+    return lines;
+  }
+
+  /** Return cached lines, recomputing only when the cache key changes. */
+  _getLines(context) {
+    const key = `${this._fontString()}||${this.wrapMode}||${this.elide}||${this.maximumLineCount || 0}||${this.width || 0}||${String(this.text ?? '')}`;
+    if (this._lineCache !== null && this._lineCacheKey === key) {
+      return this._lineCache;
+    }
+    this._lineCache = this._buildLines(context);
+    this._lineCacheKey = key;
+    return this._lineCache;
+  }
+
+  /**
+   * Recompute and update implicitWidth / implicitHeight from the current line layout.
+   * Returns the array of lines.
+   */
+  _measure(context) {
+    const lines = this._getLines(context);
+    const fontString = this._fontString();
     const font = this.font || {};
-    const size = font.pixelSize || 14;
-    const family = font.family || 'sans-serif';
-    const bold = font.bold ? 'bold ' : '';
-    return `${bold}${size}px ${family}`;
+    const pixelSize = font.pixelSize || 14;
+    const lineH = pixelSize * (this.lineHeight || 1.0);
+    let maxW = 0;
+    for (const line of lines) {
+      const lw = _measureTextWidth(context, fontString, line);
+      if (lw > maxW) maxW = lw;
+    }
+    this.implicitWidth = maxW;
+    this.implicitHeight = lines.length * lineH;
+    return lines;
   }
 
   draw(context) {
     if (!context) return;
-    const text = String(this.text ?? '');
-    if (!text) return;
+    const raw = String(this.text ?? '');
+    if (!raw) return;
 
     const fontString = this._fontString();
     context.font = fontString;
     context.fillStyle = this.color || '#000000';
     context.textBaseline = 'top';
 
-    // Stage E: use cached measurement to determine text width when needed.
+    const lines = this._measure(context);
+    const font = this.font || {};
+    const pixelSize = font.pixelSize || 14;
+    const lineH = pixelSize * (this.lineHeight || 1.0);
+    const totalH = lines.length * lineH;
     const w = this.width || 0;
-    if (w > 0 && this.elide !== 'ElideNone') {
-      // Simple elide: truncate with ellipsis if text is wider than item.
-      const measured = _measureTextWidth(context, fontString, text);
-      if (measured > w) {
-        let truncated = text;
-        while (truncated.length > 0 && _measureTextWidth(context, fontString, truncated + '…') > w) {
-          truncated = truncated.slice(0, -1);
-        }
-        context.fillText(truncated + '…', 0, 0);
-        return;
-      }
+    const h = this.height || 0;
+
+    const ha = _normalizeHAlign(this.horizontalAlignment);
+    const va = _normalizeVAlign(this.verticalAlignment);
+
+    let startY = 0;
+    if (va === 'vcenter' && h > 0) {
+      startY = Math.max(0, (h - totalH) / 2);
+    } else if (va === 'bottom' && h > 0) {
+      startY = Math.max(0, h - totalH);
     }
 
-    context.fillText(text, 0, 0);
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      const lineW = _measureTextWidth(context, fontString, line);
+      let x = 0;
+      if (ha === 'center' && w > 0) {
+        x = (w - lineW) / 2;
+      } else if (ha === 'right' && w > 0) {
+        x = w - lineW;
+      }
+      context.fillText(line, x, startY + i * lineH);
+    }
   }
 }
 
@@ -4145,88 +4342,223 @@ class Label extends Item {
 }
 
 // ---------------------------------------------------------------------------
-// Stage D: TextField
+// Stage F: TextInput – single-line editable text item
 // ---------------------------------------------------------------------------
 
-class TextField extends Item {
+class TextInput extends Item {
   constructor(options = {}) {
     super(options);
 
     this.defineProperty('text', options.text ?? '');
-    this.defineProperty('placeholderText', options.placeholderText ?? '');
+    this.defineProperty('color', options.color ?? '#000000');
+    this.defineProperty('font', options.font ?? { family: 'sans-serif', pixelSize: 14, bold: false });
+    this.defineProperty('cursorPosition', 0);
+    this.defineProperty('cursorVisible', false);
+    this.defineProperty('selectionStart', 0);
+    this.defineProperty('selectionEnd', 0);
+    this.defineProperty('selectedText', '');
+    this.defineProperty('readOnly', options.readOnly ?? false);
+    this.defineProperty('echoMode', options.echoMode ?? 'Normal');
+    this.defineProperty('horizontalAlignment', options.horizontalAlignment ?? 'left');
+
+    // Custom signals not auto-created by defineProperty
+    this.defineSignal('accepted');
+    this.defineSignal('editingFinished');
+    this.defineSignal('selectionChanged');
 
     // Make focusable
     this.activeFocusOnTab = true;
     this.focusable = true;
-
+    this.clip = options.clip !== undefined ? options.clip : true;
     this.implicitWidth = 120;
-    this.implicitHeight = 32;
+    this.implicitHeight = 28;
 
-    // Cursor state (internal)
-    this._cursorPos = (options.text ?? '').length;
-    this._cursorVisible = false;
+    // Internal state
     this._cursorBlinkTimer = null;
+    this._anchorPos = 0;
+    // Blink interval; 0 disables blinking (useful for deterministic tests).
+    this._blinkInterval = options.blinkInterval !== undefined ? options.blinkInterval : _CURSOR_BLINK_INTERVAL;
 
-    // Keyboard input handler
+    // Keyboard handler
     this._keys = new Keys();
-    this._keys.onPressed = (event) => {
-      this._handleKeyInput(event);
-    };
+    this._keys.onPressed = (event) => this._handleKeyInput(event);
 
-    // Start/stop cursor blink on focus change
+    // Focus change → cursor blink
     this.connect('activeFocusChanged', (focused) => {
       if (focused) {
-        this._cursorVisible = true;
+        this.cursorVisible = true;
         this._startCursorBlink();
       } else {
         this._stopCursorBlink();
-        this._cursorVisible = false;
+        this.cursorVisible = false;
+        this.signal('editingFinished').emit();
       }
     });
+
+    // Initialize cursor position to end of initial text
+    const initText = String(options.text ?? '');
+    if (initText.length > 0) {
+      this._setCursorPos(initText.length, false);
+    }
+  }
+
+  _fontString() {
+    return _buildFontString(this.font);
+  }
+
+  /** Returns the display text, applying echoMode (e.g. Password → bullets). */
+  _displayText() {
+    const text = String(this.text ?? '');
+    const echo = this.echoMode || 'Normal';
+    if (echo === 'Password' || echo === 'password') {
+      return '\u2022'.repeat(text.length);
+    }
+    return text;
+  }
+
+  /** Move cursor to pos; optionally extend selection (Shift navigation). */
+  _setCursorPos(pos, extendSelection) {
+    const text = String(this.text ?? '');
+    const newPos = Math.max(0, Math.min(pos, text.length));
+    if (!extendSelection) {
+      this._anchorPos = newPos;
+      this._doUpdateSelection(newPos, newPos);
+    } else {
+      this._doUpdateSelection(this._anchorPos, newPos);
+    }
+    this.cursorPosition = newPos;
+  }
+
+  _doUpdateSelection(anchor, cursor) {
+    const start = Math.min(anchor, cursor);
+    const end = Math.max(anchor, cursor);
+    const text = String(this.text ?? '');
+    const changed = this.selectionStart !== start || this.selectionEnd !== end;
+    this.selectionStart = start;
+    this.selectionEnd = end;
+    this.selectedText = text.slice(start, end);
+    if (changed) this.signal('selectionChanged').emit();
+  }
+
+  /** Delete the current selection and position cursor at selection start. */
+  _deleteSelection() {
+    const start = this.selectionStart;
+    const end = this.selectionEnd;
+    if (start < end) {
+      const text = String(this.text ?? '');
+      this.text = text.slice(0, start) + text.slice(end);
+      this._anchorPos = start;
+      this._doUpdateSelection(start, start);
+      this.cursorPosition = start;
+    }
   }
 
   _handleKeyInput(event) {
+    if (this.readOnly) return;
+
     const ctrl = event.ctrlKey || event.ctrl;
-    let text = this.text;
+    const shift = event.shiftKey || event.shift;
+    const text = String(this.text ?? '');
+    const pos = this.cursorPosition;
+
+    if (event.key === 'Enter' || event.key === 'Return') {
+      this.signal('accepted').emit();
+      event.accepted = true;
+      return;
+    }
+
+    if (ctrl) {
+      if (event.key === 'a' || event.key === 'A') {
+        this._anchorPos = 0;
+        this._doUpdateSelection(0, text.length);
+        this.cursorPosition = text.length;
+        event.accepted = true;
+        return;
+      }
+      if (event.key === 'c' || event.key === 'C') {
+        if (typeof navigator !== 'undefined' && navigator.clipboard) {
+          navigator.clipboard.writeText(this.selectedText).catch(() => {});
+        }
+        event.accepted = true;
+        return;
+      }
+      if (event.key === 'x' || event.key === 'X') {
+        if (typeof navigator !== 'undefined' && navigator.clipboard) {
+          navigator.clipboard.writeText(this.selectedText).catch(() => {});
+        }
+        this._deleteSelection();
+        event.accepted = true;
+        return;
+      }
+      if (event.key === 'v' || event.key === 'V') {
+        if (typeof navigator !== 'undefined' && navigator.clipboard) {
+          navigator.clipboard.readText().then((clipText) => {
+            this._deleteSelection();
+            const t = String(this.text ?? '');
+            const p = this.cursorPosition;
+            this.text = t.slice(0, p) + clipText + t.slice(p);
+            this._setCursorPos(p + clipText.length, false);
+          }).catch(() => {});
+        }
+        event.accepted = true;
+        return;
+      }
+    }
 
     if (event.key === 'Backspace') {
-      if (this._cursorPos > 0) {
-        this.text = text.slice(0, this._cursorPos - 1) + text.slice(this._cursorPos);
-        this._cursorPos -= 1;
+      if (this.selectionStart < this.selectionEnd) {
+        this._deleteSelection();
+      } else if (pos > 0) {
+        this.text = text.slice(0, pos - 1) + text.slice(pos);
+        this._setCursorPos(pos - 1, false);
       }
       event.accepted = true;
     } else if (event.key === 'Delete') {
-      if (this._cursorPos < text.length) {
-        this.text = text.slice(0, this._cursorPos) + text.slice(this._cursorPos + 1);
+      if (this.selectionStart < this.selectionEnd) {
+        this._deleteSelection();
+      } else if (pos < text.length) {
+        this.text = text.slice(0, pos) + text.slice(pos + 1);
       }
       event.accepted = true;
     } else if (event.key === 'ArrowLeft') {
-      if (this._cursorPos > 0) this._cursorPos -= 1;
+      if (!shift && this.selectionStart < this.selectionEnd) {
+        this._setCursorPos(this.selectionStart, false);
+      } else if (pos > 0) {
+        this._setCursorPos(pos - 1, shift);
+      }
       event.accepted = true;
     } else if (event.key === 'ArrowRight') {
-      if (this._cursorPos < text.length) this._cursorPos += 1;
+      if (!shift && this.selectionStart < this.selectionEnd) {
+        this._setCursorPos(this.selectionEnd, false);
+      } else if (pos < text.length) {
+        this._setCursorPos(pos + 1, shift);
+      }
       event.accepted = true;
     } else if (event.key === 'Home') {
-      this._cursorPos = 0;
+      this._setCursorPos(0, shift);
       event.accepted = true;
     } else if (event.key === 'End') {
-      this._cursorPos = text.length;
+      this._setCursorPos(text.length, shift);
       event.accepted = true;
     } else if (event.key && event.key.length === 1 && !ctrl) {
-      this.text = text.slice(0, this._cursorPos) + event.key + text.slice(this._cursorPos);
-      this._cursorPos += 1;
+      if (this.selectionStart < this.selectionEnd) {
+        this._deleteSelection();
+      }
+      const p = this.cursorPosition;
+      const t = String(this.text ?? '');
+      this.text = t.slice(0, p) + event.key + t.slice(p);
+      this._setCursorPos(p + 1, false);
       event.accepted = true;
     }
   }
 
   _startCursorBlink() {
     this._stopCursorBlink();
-    this._cursorVisible = true;
-    if (typeof setInterval === 'function') {
+    this.cursorVisible = true;
+    if (this._blinkInterval > 0 && typeof setInterval === 'function') {
       const timer = setInterval(() => {
-        this._cursorVisible = !this._cursorVisible;
-      }, 500);
-      // In Node.js, unref so the timer doesn't prevent process exit
+        this.cursorVisible = !this.cursorVisible;
+      }, this._blinkInterval);
       if (timer && typeof timer.unref === 'function') {
         timer.unref();
       }
@@ -4245,16 +4577,108 @@ class TextField extends Item {
 
   handlePointerEvent(type, event) {
     if (type === 'down') {
-      // Position cursor at click (approximate)
-      const localX = event.x;
-      const text = this.text;
-      const font = Theme.font;
-      // Best-effort character index from click position
-      // Without actual canvas context here we place cursor at end
-      this._cursorPos = text.length;
+      // Best-effort: position cursor at end (no canvas context available here).
+      this._setCursorPos(String(this.text ?? '').length, false);
       return true;
     }
     return false;
+  }
+
+  draw(context) {
+    const w = this.width || this.implicitWidth || 120;
+    const h = this.height || this.implicitHeight || 28;
+    const fontString = this._fontString();
+    context.font = fontString;
+    context.textBaseline = 'middle';
+
+    const displayText = this._displayText();
+    const pos = this.cursorPosition;
+    const selStart = this.selectionStart;
+    const selEnd = this.selectionEnd;
+
+    const ha = _normalizeHAlign(this.horizontalAlignment);
+    const textW = _measureTextWidth(context, fontString, displayText);
+    let textX = 0;
+    if (ha === 'center') {
+      textX = (w - textW) / 2;
+    } else if (ha === 'right') {
+      textX = w - textW;
+    }
+
+    // Selection highlight
+    if (selStart < selEnd) {
+      const beforeSel = displayText.slice(0, selStart);
+      const selStr = displayText.slice(selStart, selEnd);
+      const selX = textX + _measureTextWidth(context, fontString, beforeSel);
+      const selW = _measureTextWidth(context, fontString, selStr);
+      context.fillStyle = 'rgba(0, 120, 215, 0.3)';
+      context.fillRect(selX, 0, selW, h);
+    }
+
+    // Text
+    context.fillStyle = this.color || '#000000';
+    context.fillText(displayText, textX, h / 2);
+
+    // Cursor caret
+    if (this.activeFocus && this.cursorVisible) {
+      const beforeCursor = displayText.slice(0, pos);
+      const cursorX = textX + _measureTextWidth(context, fontString, beforeCursor);
+      context.strokeStyle = this.color || '#000000';
+      context.lineWidth = 1;
+      context.beginPath();
+      context.moveTo(cursorX, 2);
+      context.lineTo(cursorX, h - 2);
+      context.stroke();
+    }
+  }
+
+  destroy() {
+    this._stopCursorBlink();
+    super.destroy();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Stage D: TextField – styled single-line text control backed by TextInput
+// ---------------------------------------------------------------------------
+
+class TextField extends Item {
+  constructor(options = {}) {
+    super(options);
+
+    this.defineProperty('text', options.text ?? '');
+    this.defineProperty('placeholderText', options.placeholderText ?? '');
+
+    // Make focusable
+    this.activeFocusOnTab = true;
+    this.focusable = true;
+    this.implicitWidth = 120;
+    this.implicitHeight = 32;
+
+    // Internal TextInput carries all editing logic (cursor, selection, blink).
+    this._textInput = new TextInput({
+      text: options.text ?? '',
+      blinkInterval: options.blinkInterval !== undefined ? options.blinkInterval : _CURSOR_BLINK_INTERVAL,
+    });
+
+    // Keep this.text ↔ _textInput.text in sync (guard against cycles).
+    this._textInput.connect('textChanged', (v) => {
+      if (this.text !== v) this.text = v;
+    });
+    this.connect('textChanged', (v) => {
+      if (this._textInput.text !== v) this._textInput.text = v;
+    });
+
+    // Keyboard input delegates to the internal TextInput.
+    this._keys = new Keys();
+    this._keys.onPressed = (event) => {
+      this._textInput._handleKeyInput(event);
+    };
+
+    // Focus changes are forwarded to TextInput so it manages cursor blinking.
+    this.connect('activeFocusChanged', (focused) => {
+      this._textInput.activeFocus = focused;
+    });
   }
 
   draw(context) {
@@ -4293,9 +4717,9 @@ class TextField extends Item {
       context.fillText(placeholder, padding, h / 2);
     }
 
-    // Cursor
-    if (this.activeFocus && this._cursorVisible) {
-      const cursorText = text.slice(0, this._cursorPos);
+    // Cursor (state from internal TextInput)
+    if (this.activeFocus && this._textInput.cursorVisible) {
+      const cursorText = text.slice(0, this._textInput.cursorPosition);
       const cursorX = padding + context.measureText(cursorText).width;
       context.strokeStyle = p.cursor;
       context.lineWidth = 1;
@@ -4309,7 +4733,7 @@ class TextField extends Item {
   }
 
   destroy() {
-    this._stopCursorBlink();
+    this._textInput.destroy();
     super.destroy();
   }
 }
@@ -5563,6 +5987,8 @@ const runtimeExports = {
   Rectangle,
   MouseArea,
   Text,
+  // Stage F: TextInput
+  TextInput,
   // Stage A: animations
   Easing,
   AnimationTicker,

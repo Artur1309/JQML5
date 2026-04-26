@@ -1075,3 +1075,51 @@ Item {
   assert.match(js, /minimumWidth/);
   assert.match(js, /preferredWidth/);
 });
+
+// ---------------------------------------------------------------------------
+// Stage F: TextInput compiles and emits correct runtime calls
+// ---------------------------------------------------------------------------
+
+test('TextInput compiles from QtQuick and emits TextInput constructor', async () => {
+  const fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), 'jqmlc-textinput-'));
+  const outdir = path.join(fixtureDir, 'out');
+  fs.mkdirSync(outdir, { recursive: true });
+
+  fs.writeFileSync(path.join(fixtureDir, 'Main.qml'), `
+import QtQuick 2.15
+Item {
+  id: root
+  width: 400
+  height: 200
+
+  TextInput {
+    id: myInput
+    width: 240
+    height: 28
+    color: "#111111"
+    echoMode: TextInput.Normal
+
+    onAccepted: {
+      console.log("accepted:", myInput.text)
+    }
+
+    onTextChanged: {
+      console.log("text:", myInput.text)
+    }
+  }
+}
+`, 'utf8');
+
+  const result = await compileQmlApplication({
+    entryFile: path.join(fixtureDir, 'Main.qml'),
+    outdir,
+  });
+
+  assert.equal(result.componentCount >= 1, true);
+  const js = fs.readFileSync(path.join(outdir, 'app.js'), 'utf8');
+
+  // TextInput must be instantiated
+  assert.match(js, /TextInput/);
+  // echoMode enum must be resolved
+  assert.match(js, /Normal/);
+});
