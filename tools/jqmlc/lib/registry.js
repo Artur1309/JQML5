@@ -60,6 +60,13 @@ const RUNTIME_TYPES = [
   ['State', { kind: 'runtime', runtimeExport: 'State', category: 'quick-states' }],
   ['Transition', { kind: 'runtime', runtimeExport: 'Transition', category: 'quick-states' }],
   ['Behavior', { kind: 'runtime', runtimeExport: 'Behavior', category: 'quick-states' }],
+  // Stage B: text
+  ['Text', { kind: 'runtime', runtimeExport: 'Text', category: 'quick', isItem: true }],
+  // Stage B: models / views
+  ['ListElement', { kind: 'list-element', runtimeExport: 'ListElement', category: 'quick-model' }],
+  ['ListModel', { kind: 'list-model', runtimeExport: 'ListModel', category: 'quick-model' }],
+  ['Repeater', { kind: 'runtime', runtimeExport: 'Repeater', category: 'quick-model', isItem: true }],
+  ['ListView', { kind: 'runtime', runtimeExport: 'ListView', category: 'quick-model', isItem: true }],
 ];
 
 function createDefaultRegistries() {
@@ -72,8 +79,10 @@ function createDefaultRegistries() {
   modules.registerModule('QtQuick', {
     listTypes: () => [
       'Item', 'Rectangle', 'MouseArea', 'Loader', 'CanvasRenderer', 'Scene',
+      'Text',
       'Animation', 'NumberAnimation', 'ColorAnimation', 'SequentialAnimation', 'ParallelAnimation',
       'PropertyChanges', 'State', 'Transition', 'Behavior',
+      'ListElement', 'ListModel', 'Repeater', 'ListView',
     ],
   });
   modules.registerModule('QtQml', {
