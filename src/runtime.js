@@ -6035,7 +6035,7 @@ class ScrollBar extends Item {
 
   _isVertical() {
     const o = this.orientation;
-    // Accept int Qt enum values (2 = Qt.Vertical, 1 = Qt.Horizontal)
+    // Accept numeric Qt enum values: Qt.Vertical = 2, Qt.Horizontal = 1
     return o === 'Vertical' || o === 2 || o === 'Qt.Vertical';
   }
 
@@ -6146,7 +6146,8 @@ class ScrollView extends Item {
     this.defineProperty('ScrollBarVerticalPolicy',   options.ScrollBarVerticalPolicy   ?? 'ScrollBarAsNeeded');
     this.defineProperty('ScrollBarHorizontalPolicy', options.ScrollBarHorizontalPolicy ?? 'ScrollBarAsNeeded');
 
-    const barW = 8;
+    // Scrollbar thickness in pixels (used in constructor and _layout)
+    this._scrollBarWidth = 8;
 
     // Internal Flickable that holds the content
     this._flickable = new Flickable({
@@ -6186,7 +6187,7 @@ class ScrollView extends Item {
   _layout() {
     const w = this.width  || 0;
     const h = this.height || 0;
-    const barW = 8;
+    const barW = this._scrollBarWidth;
     const vVisible = this._vBar._shouldShow();
     const hVisible = this._hBar._shouldShow();
     const innerW = w - (vVisible ? barW : 0);
@@ -6453,7 +6454,9 @@ class StackView extends Item {
 
   /**
    * Pop the top item off the stack.
-   * @returns {Item|null} The item that was removed, or null if stack was empty.
+   * Returns null (without removing anything) when the stack has only one item –
+   * the root page is preserved, consistent with Qt's StackView behaviour.
+   * @returns {Item|null} The item that was removed, or null if stack depth <= 1.
    */
   pop() {
     if (this._stack.length <= 1) return null;
