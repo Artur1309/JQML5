@@ -411,6 +411,25 @@ const __ATTACHED_HANDLERS = {
       return __runJs(_v, hs, object);
     };
   },
+  // ListView attached reuse handlers – Qt parity.
+  // Called with 0 arguments; delegate reads index/model/modelData from context.
+  'ListView.onPooled': function(object, valueNode, scopeState) {
+    var _v = valueNode;
+    if (!object._listViewAttached) object._listViewAttached = { onPooled: null, onReused: null };
+    object._listViewAttached.onPooled = function() {
+      var hs = __createExecutionScope(object, scopeState, object.parentItem || object.parent, null);
+      return __runJs(_v, hs, object);
+    };
+  },
+  'ListView.onReused': function(object, valueNode, scopeState) {
+    var _v = valueNode;
+    // Ensure the attached bag exists (may have been created by onPooled already).
+    if (!object._listViewAttached) object._listViewAttached = { onPooled: null, onReused: null };
+    object._listViewAttached.onReused = function() {
+      var hs = __createExecutionScope(object, scopeState, object.parentItem || object.parent, null);
+      return __runJs(_v, hs, object);
+    };
+  },
   // ScrollBar attached properties on Flickable / ListView
   'ScrollBar.vertical': function(object, bar, scopeState) {
     if (bar instanceof __runtime.Binding) { try { bar = bar.evaluate(object); } catch(_) { bar = null; } }

@@ -4764,3 +4764,470 @@ test('ListView reuseItems=true pools items and fires pooled/reused signals', () 
 
   lv.destroy();
 });
+
+// ---------------------------------------------------------------------------
+// ListView – attached handlers (ListView.onPooled / ListView.onReused)
+// ---------------------------------------------------------------------------
+
+test('ListView attached onPooled/onReused handlers fire with 0 args when reuseItems=true', () => {
+  const { ListModel, ListView, Component, Item, Context } = require('../src/runtime');
+
+  const model = new ListModel();
+  for (let i = 0; i < 30; i++) model.append({ n: i });
+
+  const lv = new ListView();
+  lv.width = 200;
+  lv.height = 200;
+  lv._delegateHeight = 40;
+  lv.cacheBuffer = 0;
+  lv.reuseItems = true;
+  lv.setContext(new Context(null, {}));
+
+  const attachedPooledCalls = [];
+  const attachedReusedCalls = [];
+
+  const delegate = new Component(({ parent: p }) => {
+    const item = new Item({ parentItem: p });
+    item.height = 40;
+    // Attach Qt-like handlers to the delegate item
+    ListView._getAttached(item).onPooled = function () {
+      attachedPooledCalls.push({ argCount: arguments.length, self: this });
+    };
+    ListView._getAttached(item).onReused = function () {
+      attachedReusedCalls.push({ argCount: arguments.length, self: this });
+    };
+    return item;
+  });
+
+  lv.model = model;
+  lv.delegate = delegate;
+
+  // Scroll far enough to pool items and reuse them in the new visible range
+  lv.contentY = 800;
+
+  assert.ok(attachedPooledCalls.length > 0, 'attached onPooled should have fired');
+  assert.ok(attachedReusedCalls.length > 0, 'attached onReused should have fired');
+
+  // Qt parity: handlers called with 0 arguments
+  for (const call of attachedPooledCalls) {
+    assert.equal(call.argCount, 0, 'onPooled must be called with 0 args');
+  }
+  for (const call of attachedReusedCalls) {
+    assert.equal(call.argCount, 0, 'onReused must be called with 0 args');
+  }
+
+  lv.destroy();
+});
+
+test('ListView attached onReused receives updated item as `this`', () => {
+  const { ListModel, ListView, Component, Item, Context } = require('../src/runtime');
+
+  const model = new ListModel();
+  for (let i = 0; i < 20; i++) model.append({ n: i });
+
+  const lv = new ListView();
+  lv.width = 200;
+  lv.height = 100;
+  lv._delegateHeight = 40;
+  lv.cacheBuffer = 0;
+  lv.reuseItems = true;
+  lv.setContext(new Context(null, {}));
+
+  const reusedItems = [];
+
+  const delegate = new Component(({ parent: p }) => {
+    const item = new Item({ parentItem: p });
+    item.height = 40;
+    ListView._getAttached(item).onReused = function () {
+      reusedItems.push(this);
+    };
+    return item;
+  });
+
+  lv.model = model;
+  lv.delegate = delegate;
+  lv.contentY = 600;
+
+  assert.ok(reusedItems.length > 0, 'onReused should have fired');
+  for (const item of reusedItems) {
+    assert.ok(item instanceof Item, 'onReused `this` should be the delegate Item');
+  }
+
+  lv.destroy();
+});
+
+// ---------------------------------------------------------------------------
+// ListView – variable height delegates (vertical)
+// ---------------------------------------------------------------------------
+
+test('ListView variable heights: contentHeight equals sum of all delegate heights', () => {
+  const { ListModel, ListView, Component, Item, Context } = require('../src/runtime');
+
+  const model = new ListModel();
+  const count = 10;
+  for (let i = 0; i < count; i++) model.append({ n: i });
+
+  const lv = new ListView();
+  lv.width = 200;
+  // Make viewport large enough to show all items
+  lv.height = 2000;
+  lv.cacheBuffer = 0;
+  lv.setContext(new Context(null, {}));
+
+  const delegate = new Component(({ parent: p, context: ctx }) => {
+    const item = new Item({ parentItem: p });
+    // Variable height: 30 + index * 10
+    const idx = (ctx && ctx.lookup) ? (ctx.lookup('index') ?? 0) : 0;
+    item.height = 30 + idx * 10;
+    return item;
+  });
+
+  lv.model = model;
+  lv.delegate = delegate;
+
+  // Expected: sum(30 + i*10 for i in 0..9) = 10*30 + 10*9/2*10 = 300 + 450 = 750
+  const expectedHeight = Array.from({ length: count }, (_, i) => 30 + i * 10)
+    .reduce((a, b) => a + b, 0);
+  assert.equal(lv.contentHeight, expectedHeight,
+    `contentHeight should be ${expectedHeight} (sum of all variable delegate heights)`);
+
+  lv.destroy();
+});
+
+test('ListView variable heights: delegates do not overlap (y positions correct)', () => {
+  const { ListModel, ListView, Component, Item, Context } = require('../src/runtime');
+
+  const model = new ListModel();
+  const count = 8;
+  for (let i = 0; i < count; i++) model.append({ n: i });
+
+  const lv = new ListView();
+  lv.width = 200;
+  lv.height = 2000;
+  lv.cacheBuffer = 0;
+  lv.setContext(new Context(null, {}));
+
+  const sizes = [50, 80, 30, 60, 45, 70, 25, 55];
+  let callIdx = 0;
+
+  const delegate = new Component(({ parent: p }) => {
+    const item = new Item({ parentItem: p });
+    item.height = sizes[callIdx++] ?? 40;
+    return item;
+  });
+
+  lv.model = model;
+  lv.delegate = delegate;
+
+  // Check that each item starts where the previous one ends
+  let expectedY = 0;
+  for (let i = 0; i < count; i++) {
+    const item = lv.itemAt(i);
+    assert.ok(item !== null, `item at index ${i} should exist`);
+    assert.equal(item.y, expectedY, `item[${i}].y should be ${expectedY}`);
+    expectedY += sizes[i];
+  }
+
+  lv.destroy();
+});
+
+test('ListView variable heights: scrolling shows correct visible items', () => {
+  const { ListModel, ListView, Component, Item, Context } = require('../src/runtime');
+
+  const model = new ListModel();
+  for (let i = 0; i < 20; i++) model.append({ n: i });
+
+  const lv = new ListView();
+  lv.width = 200;
+  lv.height = 100;
+  lv.cacheBuffer = 0;
+  lv.setContext(new Context(null, {}));
+
+  // All items have height=50
+  const delegate = new Component(({ parent: p }) => {
+    const item = new Item({ parentItem: p });
+    item.height = 50;
+    return item;
+  });
+
+  lv.model = model;
+  lv.delegate = delegate;
+
+  // At contentY=0, items 0 and 1 are visible
+  assert.ok(lv.itemAt(0) !== null, 'item 0 should be visible at contentY=0');
+  assert.ok(lv.itemAt(1) !== null, 'item 1 should be visible at contentY=0');
+
+  // Scroll to item 4 (y=200)
+  lv.contentY = 200;
+
+  // Items 0-1 should be gone (or pooled/destroyed)
+  assert.ok(lv.itemAt(0) === null || !lv.itemAt(0)?.visible,
+    'item 0 should not be visible after scrolling past it');
+  // Items around index 4-5 should be visible
+  assert.ok(lv.itemAt(4) !== null, 'item 4 should be visible at contentY=200');
+
+  lv.destroy();
+});
+
+test('ListView dynamic height change triggers layout recompute', () => {
+  const { ListModel, ListView, Component, Item, Context } = require('../src/runtime');
+
+  const model = new ListModel();
+  for (let i = 0; i < 5; i++) model.append({ n: i });
+
+  const lv = new ListView();
+  lv.width = 200;
+  lv.height = 1000;
+  lv.cacheBuffer = 0;
+  lv.setContext(new Context(null, {}));
+
+  const delegate = new Component(({ parent: p }) => {
+    const item = new Item({ parentItem: p });
+    item.height = 50;
+    return item;
+  });
+
+  lv.model = model;
+  lv.delegate = delegate;
+
+  const originalContentHeight = lv.contentHeight; // should be 5 * 50 = 250
+  assert.equal(originalContentHeight, 250, 'initial contentHeight should be 250');
+
+  // Dynamically change item 2's height
+  const item2 = lv.itemAt(2);
+  assert.ok(item2 !== null, 'item 2 should exist');
+  item2.height = 100;  // was 50, now 100 → contentHeight should increase by 50
+
+  assert.equal(lv.contentHeight, 300, 'contentHeight should update after delegate height change');
+  // Item 3 should have shifted down by 50
+  const item3 = lv.itemAt(3);
+  assert.ok(item3 !== null, 'item 3 should exist');
+  assert.equal(item3.y, 200, 'item 3 y should be 200 after item 2 height increase (50+50+100)');
+
+  lv.destroy();
+});
+
+// ---------------------------------------------------------------------------
+// ListView – variable width delegates (horizontal)
+// ---------------------------------------------------------------------------
+
+test('ListView horizontal orientation: contentWidth equals sum of delegate widths', () => {
+  const { ListModel, ListView, Component, Item, Context } = require('../src/runtime');
+
+  const model = new ListModel();
+  const count = 8;
+  for (let i = 0; i < count; i++) model.append({ n: i });
+
+  const lv = new ListView();
+  lv.orientation = 'horizontal';
+  lv.width = 2000;
+  lv.height = 100;
+  lv.cacheBuffer = 0;
+  lv.setContext(new Context(null, {}));
+
+  const widths = [60, 80, 40, 70, 50, 90, 30, 65];
+  let callIdx = 0;
+
+  const delegate = new Component(({ parent: p }) => {
+    const item = new Item({ parentItem: p });
+    item.width = widths[callIdx++] ?? 50;
+    item.height = 100;
+    return item;
+  });
+
+  lv.model = model;
+  lv.delegate = delegate;
+
+  const expectedWidth = widths.reduce((a, b) => a + b, 0);
+  assert.equal(lv.contentWidth, expectedWidth,
+    `contentWidth should be ${expectedWidth} for horizontal ListView`);
+
+  lv.destroy();
+});
+
+test('ListView horizontal orientation: delegates do not overlap (x positions correct)', () => {
+  const { ListModel, ListView, Component, Item, Context } = require('../src/runtime');
+
+  const model = new ListModel();
+  const count = 6;
+  for (let i = 0; i < count; i++) model.append({ n: i });
+
+  const lv = new ListView();
+  lv.orientation = 'horizontal';
+  lv.width = 2000;
+  lv.height = 100;
+  lv.cacheBuffer = 0;
+  lv.setContext(new Context(null, {}));
+
+  const widths = [60, 80, 40, 70, 50, 90];
+  let callIdx = 0;
+
+  const delegate = new Component(({ parent: p }) => {
+    const item = new Item({ parentItem: p });
+    item.width = widths[callIdx++] ?? 50;
+    item.height = 100;
+    return item;
+  });
+
+  lv.model = model;
+  lv.delegate = delegate;
+
+  let expectedX = 0;
+  for (let i = 0; i < count; i++) {
+    const item = lv.itemAt(i);
+    assert.ok(item !== null, `item at index ${i} should exist`);
+    assert.equal(item.x, expectedX, `item[${i}].x should be ${expectedX}`);
+    expectedX += widths[i];
+  }
+
+  lv.destroy();
+});
+
+test('ListView horizontal orientation: scrolling via contentX shows correct items', () => {
+  const { ListModel, ListView, Component, Item, Context } = require('../src/runtime');
+
+  const model = new ListModel();
+  for (let i = 0; i < 20; i++) model.append({ n: i });
+
+  const lv = new ListView();
+  lv.orientation = 'horizontal';
+  lv.width = 100;
+  lv.height = 100;
+  lv.cacheBuffer = 0;
+  lv.setContext(new Context(null, {}));
+
+  const delegate = new Component(({ parent: p }) => {
+    const item = new Item({ parentItem: p });
+    item.width = 60;
+    item.height = 100;
+    return item;
+  });
+
+  lv.model = model;
+  lv.delegate = delegate;
+
+  assert.ok(lv.itemAt(0) !== null, 'item 0 should be visible initially');
+
+  // Scroll to offset 300 (items 0-4 are at 0,60,120,180,240 – so item 5 starts at 300)
+  lv.contentX = 300;
+
+  assert.ok(lv.itemAt(0) === null || !lv.itemAt(0)?.visible,
+    'item 0 should not be visible after scrolling past it');
+  assert.ok(lv.itemAt(5) !== null, 'item 5 should be visible at contentX=300');
+
+  lv.destroy();
+});
+
+test('ListView horizontal dynamic width change triggers layout recompute', () => {
+  const { ListModel, ListView, Component, Item, Context } = require('../src/runtime');
+
+  const model = new ListModel();
+  for (let i = 0; i < 4; i++) model.append({ n: i });
+
+  const lv = new ListView();
+  lv.orientation = 'horizontal';
+  lv.width = 2000;
+  lv.height = 100;
+  lv.cacheBuffer = 0;
+  lv.setContext(new Context(null, {}));
+
+  const delegate = new Component(({ parent: p }) => {
+    const item = new Item({ parentItem: p });
+    item.width = 50;
+    item.height = 100;
+    return item;
+  });
+
+  lv.model = model;
+  lv.delegate = delegate;
+
+  assert.equal(lv.contentWidth, 200, 'initial contentWidth should be 4 * 50 = 200');
+
+  const item1 = lv.itemAt(1);
+  assert.ok(item1 !== null, 'item 1 should exist');
+  item1.width = 100;  // was 50
+
+  assert.equal(lv.contentWidth, 250, 'contentWidth should increase by 50 after width change');
+  // item 2 should shift right by 50
+  const item2 = lv.itemAt(2);
+  assert.ok(item2 !== null, 'item 2 should exist');
+  assert.equal(item2.x, 150, 'item 2 x should be 150 after item 1 width change (50+100)');
+
+  lv.destroy();
+});
+
+// ---------------------------------------------------------------------------
+// ListView – prefix-sum internal helpers
+// ---------------------------------------------------------------------------
+
+test('ListView _buildPrefixSums correctly computes offsets with variable sizes', () => {
+  const { ListModel, ListView, Component, Item, Context } = require('../src/runtime');
+
+  const model = new ListModel();
+  for (let i = 0; i < 5; i++) model.append({ n: i });
+
+  const lv = new ListView();
+  lv.width = 200;
+  lv.height = 2000;
+  lv.cacheBuffer = 0;
+  lv.setContext(new Context(null, {}));
+
+  const sizes = [10, 20, 30, 40, 50];
+  let callIdx = 0;
+
+  const delegate = new Component(({ parent: p }) => {
+    const item = new Item({ parentItem: p });
+    item.height = sizes[callIdx++] ?? 40;
+    return item;
+  });
+
+  lv.model = model;
+  lv.delegate = delegate;
+
+  // _offsetAtIndex(i) should give cumulative start
+  assert.equal(lv._offsetAtIndex(0), 0,   'offset[0] = 0');
+  assert.equal(lv._offsetAtIndex(1), 10,  'offset[1] = 10');
+  assert.equal(lv._offsetAtIndex(2), 30,  'offset[2] = 30');
+  assert.equal(lv._offsetAtIndex(3), 60,  'offset[3] = 60');
+  assert.equal(lv._offsetAtIndex(4), 100, 'offset[4] = 100');
+  assert.equal(lv._totalDelegateSize(), 150, 'total delegate size = 150');
+
+  lv.destroy();
+});
+
+test('ListView _indexAtOffset binary-search returns correct index', () => {
+  const { ListModel, ListView, Component, Item, Context } = require('../src/runtime');
+
+  const model = new ListModel();
+  for (let i = 0; i < 5; i++) model.append({ n: i });
+
+  const lv = new ListView();
+  lv.width = 200;
+  lv.height = 2000;
+  lv.cacheBuffer = 0;
+  lv.setContext(new Context(null, {}));
+
+  const sizes = [10, 20, 30, 40, 50];
+  let callIdx = 0;
+
+  const delegate = new Component(({ parent: p }) => {
+    const item = new Item({ parentItem: p });
+    item.height = sizes[callIdx++] ?? 40;
+    return item;
+  });
+
+  lv.model = model;
+  lv.delegate = delegate;
+
+  // offsets: 0, 10, 30, 60, 100
+  assert.equal(lv._indexAtOffset(0),   0, 'offset 0   → item 0');
+  assert.equal(lv._indexAtOffset(5),   0, 'offset 5   → item 0');
+  assert.equal(lv._indexAtOffset(10),  1, 'offset 10  → item 1');
+  assert.equal(lv._indexAtOffset(29),  1, 'offset 29  → item 1');
+  assert.equal(lv._indexAtOffset(30),  2, 'offset 30  → item 2');
+  assert.equal(lv._indexAtOffset(60),  3, 'offset 60  → item 3');
+  assert.equal(lv._indexAtOffset(100), 4, 'offset 100 → item 4');
+  assert.equal(lv._indexAtOffset(149), 4, 'offset 149 → item 4');
+
+  lv.destroy();
+});
