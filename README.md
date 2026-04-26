@@ -410,6 +410,11 @@ Output:
   - `Slider { from: 0; to: 1; value: 0.5; stepSize: 0.1; onValueChanged: … }`
   - `CheckBox { text: "Option"; checked: false; onClicked: … }`
   - `Label { text: "…"; color: "…" }`
+- **Property-path rewrites** (anchors and border)
+  - `anchors.fill: parent` / `anchors.centerIn: parent` and all edge+margin anchors compile to `setAnchors({…})` calls so the runtime applies geometry correctly.
+  - Supported `anchors.*` keys: `fill`, `centerIn`, `left`, `right`, `top`, `bottom`, `margins`, `leftMargin`, `rightMargin`, `topMargin`, `bottomMargin`, `horizontalCenterOffset`, `verticalCenterOffset`.
+  - `border.color: "…"` and `border.width: N` on `Rectangle` are rewritten to the flat runtime properties `borderColor` and `borderWidth`.
+  - The rewrite table (`__PROP_PATH_REWRITES` in `tools/jqmlc/lib/codegen.js`) is designed to be extended with further nested-property aliases (e.g. `font.pixelSize`) without changing the main property-dispatch loop.
 
 > ⚠️ Security note: the compiler intentionally supports arbitrary JavaScript in bindings/handlers, so compile and run only trusted QML sources.
 

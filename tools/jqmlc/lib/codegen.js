@@ -127,7 +127,8 @@ function generateComponentFactory(component, moduleIdMap) {
   output += `      const deferredTransitionProps = [];\n`;
   output += `      for (const prop of node.properties) {\n`;
   output += `        if (prop.name.startsWith('anchors.')) {\n`;
-  output += `          anchorBuffer[prop.name.slice('anchors.'.length)] = __compileValue(object, prop.value, scopeState, prop.name, false);\n`;
+  output += `          const _av = __compileValue(object, prop.value, scopeState, prop.name, false);\n`;
+  output += `          anchorBuffer[prop.name.slice('anchors.'.length)] = (_av instanceof __runtime.Binding) ? _av.evaluate() : _av;\n`;
   output += `          continue;\n`;
   output += `        }\n`;
   output += `        // Stage C: Keys.onPressed / Keys.onReleased attached property handlers\n`;
@@ -146,6 +147,11 @@ function generateComponentFactory(component, moduleIdMap) {
   output += `        }\n`;
   output += `        if (prop.name === 'transitions' && prop.value && prop.value.kind === 'ArrayValue') {\n`;
   output += `          deferredTransitionProps.push(prop); continue;\n`;
+  output += `        }\n`;
+  output += `        const _rw = __PROP_PATH_REWRITES[prop.name];\n`;
+  output += `        if (_rw !== undefined) {\n`;
+  output += `          __defineOrSet(object, _rw, __compileValue(object, prop.value, scopeState, _rw, false));\n`;
+  output += `          continue;\n`;
   output += `        }\n`;
   output += `        __assignPropertyPath(object, prop.name, __compileValue(object, prop.value, scopeState, prop.name, false));\n`;
   output += `      }\n`;
@@ -298,6 +304,12 @@ function generateComponentFactory(component, moduleIdMap) {
 
 function helperRuntimeCode() {
   return `
+// Table-driven property-path rewrites: maps QML dot-path to flat runtime property name.
+// Extend this table to support additional nested-property aliases (e.g. font.pixelSize).
+const __PROP_PATH_REWRITES = {
+  'border.color': 'borderColor',
+  'border.width': 'borderWidth',
+};
 const __exprCache = new Map();
 function __compileExpression(code) {
   if (!__exprCache.has(code)) {
