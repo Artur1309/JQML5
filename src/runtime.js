@@ -7231,7 +7231,7 @@ class Popup extends Item {
     const py = this._sceneOffsetY();
     const w  = this.width  || this.implicitWidth  || 0;
     const h  = this.height || this.implicitHeight || 0;
-    return sx >= px && sx <= px + w && sy >= py && sy <= py + h;
+    return sx >= px && sx < px + w && sy >= py && sy < py + h;
   }
 }
 
@@ -7423,9 +7423,9 @@ class MenuItem extends Item {
 
     const w = this.width  || this.implicitWidth  || 160;
     const h = this.height || this.implicitHeight || 32;
-    const lx = event.sceneX - this._sceneX();
-    const ly = event.sceneY - this._sceneY();
-    const inside = lx >= 0 && lx <= w && ly >= 0 && ly <= h;
+    const lx = event.sceneX - this._sceneOffsetX();
+    const ly = event.sceneY - this._sceneOffsetY();
+    const inside = lx >= 0 && lx < w && ly >= 0 && ly < h;
 
     if (type === 'move') {
       this._setPropertyValue('hovered', inside);
@@ -7472,15 +7472,15 @@ class MenuItem extends Item {
     context.textBaseline = 'top';
   }
 
-  // Helper: scene X of this item
-  _sceneX() {
+  // Helper: scene X/Y offset of this item (consistent with Popup._sceneOffsetX/Y naming)
+  _sceneOffsetX() {
     let x = this.x || 0;
     let p = this.parentItem;
     while (p) { x += (p.x || 0); p = p.parentItem; }
     return x;
   }
 
-  _sceneY() {
+  _sceneOffsetY() {
     let y = this.y || 0;
     let p = this.parentItem;
     while (p) { y += (p.y || 0); p = p.parentItem; }

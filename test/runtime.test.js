@@ -4577,6 +4577,6 @@ test('Popup containsScenePoint returns correct values', () => {
 
   assert.equal(popup.containsScenePoint(150, 150), true,  'inside should return true');
   assert.equal(popup.containsScenePoint(50,  50),  false, 'outside should return false');
-  assert.equal(popup.containsScenePoint(300, 300), true,  'exactly on edge should return true');
-  assert.equal(popup.containsScenePoint(301, 301), false, 'just outside edge should return false');
+  assert.equal(popup.containsScenePoint(300, 300), false, 'upper bound is exclusive');
+  assert.equal(popup.containsScenePoint(299, 299), true,  'just inside upper bound should return true');
 });
