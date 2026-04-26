@@ -895,7 +895,8 @@ test('ListView creates delegates for visible range', () => {
 
   // With height=200, rowHeight=40, cacheBuffer=40:
   // firstVisible = max(0, floor((0-40)/40)) = 0
-  // lastVisible = min(19, ceil((0+200+40)/40)) = min(19, 6) = 6 → 7 items (0..6)
+  // lastVisible = min(19, ceil((0+200+40)/40)) = min(19, ceil(6)) = 6
+  // → creates items at indices 0..6 = 7 items total
   const created = listView.createdCount;
   assert.equal(created, 7, `Expected exactly 7 items created, got ${created}`);
 });

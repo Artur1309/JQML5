@@ -2327,7 +2327,12 @@ class ListModel extends QObject {
   setProperty(index, role, value) {
     if (index < 0 || index >= this._rows.length) return;
     if (role === '__proto__' || role === 'constructor' || role === 'prototype') return;
-    this._rows[index][role] = value;
+    Object.defineProperty(this._rows[index], role, {
+      value,
+      writable: true,
+      enumerable: true,
+      configurable: true,
+    });
     this.dataChanged.emit(index, [role]);
   }
 }
