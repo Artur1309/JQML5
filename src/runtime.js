@@ -3970,17 +3970,59 @@ class ListView extends Flickable {
     this._modelDisconnectors = [];
     this._rebuilding = false;
 
+    // Header / footer item instances
+    this._headerItem = null;
+    this._footerItem = null;
+
+    // Reuse pool: offscreen delegates are parked here instead of destroyed
+    this._reusePool = [];
+    this._maxPoolSize = 20;
+
     this.defineProperty('model', null);
     this.defineProperty('delegate', null);
     this.defineProperty('spacing', 0);
     this.defineProperty('cacheBuffer', 40);  // extra pixels above/below to pre-create
 
+    // Selection / current
+    this.defineProperty('currentIndex', -1);
+    this.defineProperty('currentItem', null);
+    this.defineProperty('highlight', null);
+    this.defineProperty('highlightItem', null);
+    this.defineProperty('highlightFollowsCurrentItem', true);
+
+    // Header / footer components or items
+    this.defineProperty('header', null);
+    this.defineProperty('footer', null);
+
+    // Read-only count mirror
+    this.defineProperty('count', 0);
+
+    // Viewport boundary flags
+    this.defineProperty('atYBegin', true);
+    this.defineProperty('atYEnd', false);
+
+    // ListView is focusable so it can receive keyboard events
+    this.focusable = true;
+
     // contentY / contentHeight are inherited from Flickable.
     // Re-connect virtualization to the inherited signal:
     this.connect('modelChanged', (newModel, oldModel) => this._onModelReplaced(newModel, oldModel));
     this.connect('delegateChanged', () => this._rebuild());
-    this.connect('contentYChanged', () => this._updateVirtualization());
-    this.connect('heightChanged', () => this._updateVirtualization());
+    this.connect('contentYChanged', () => {
+      this._updateVirtualization();
+      this._updateAtBounds();
+    });
+    this.connect('heightChanged', () => {
+      this._updateVirtualization();
+      this._updateAtBounds();
+    });
+    this.connect('currentIndexChanged', () => this._onCurrentIndexChanged());
+    this.connect('highlightChanged', () => this._onHighlightChanged());
+    this.connect('headerChanged', () => this._onHeaderFooterChanged('header'));
+    this.connect('footerChanged', () => this._onHeaderFooterChanged('footer'));
+
+    // Keyboard navigation: ArrowUp/Down, PageUp/Down
+    this.keys.onPressed = (event) => this._handleListViewKey(event);
 
     if (options.model !== undefined) this.model = options.model;
     if (options.delegate !== undefined) this.delegate = options.delegate;
@@ -3991,6 +4033,54 @@ class ListView extends Flickable {
   get viewportHeight() {
     return this.height;
   }
+
+  // -----------------------------------------------------------------------
+  // Header / footer helpers
+  // -----------------------------------------------------------------------
+
+  _headerHeight() {
+    return this._headerItem ? (this._headerItem.height || 0) : 0;
+  }
+
+  _footerHeight() {
+    return this._footerItem ? (this._footerItem.height || 0) : 0;
+  }
+
+  _onHeaderFooterChanged(which) {
+    const isHeader = which === 'header';
+    const existingItem = isHeader ? this._headerItem : this._footerItem;
+    if (existingItem) existingItem.destroy();
+    if (isHeader) this._headerItem = null;
+    else this._footerItem = null;
+
+    const value = isHeader ? this.header : this.footer;
+    let created = null;
+    if (value instanceof Component) {
+      created = value.createObject(this, {}, this.getContext(), this.getComponentScope());
+    } else if (value instanceof Item) {
+      created = value;
+      created.parentItem = this;
+    }
+    if (created) {
+      created.x = 0;
+      created.y = isHeader ? 0 : this._headerHeight() + this._totalDelegateHeight();
+    }
+    if (isHeader) this._headerItem = created;
+    else this._footerItem = created;
+
+    this._rebuild();
+  }
+
+  _positionFooter() {
+    if (this._footerItem) {
+      this._footerItem.y = this._headerHeight() + this._totalDelegateHeight();
+      this._footerItem.x = 0;
+    }
+  }
+
+  // -----------------------------------------------------------------------
+  // Model helpers
+  // -----------------------------------------------------------------------
 
   _disconnectModel() {
     for (const disconnect of this._modelDisconnectors) {
@@ -4022,16 +4112,30 @@ class ListView extends Flickable {
     return this._delegateHeight + (this.spacing || 0);
   }
 
-  _totalContentHeight() {
+  _totalDelegateHeight() {
     const count = _modelCount(this.model);
     if (count === 0) return 0;
     return count * this._delegateHeight + Math.max(0, count - 1) * (this.spacing || 0);
   }
 
+  _totalContentHeight() {
+    return this._headerHeight() + this._totalDelegateHeight() + this._footerHeight();
+  }
+
+  // -----------------------------------------------------------------------
+  // Rebuild / virtualization
+  // -----------------------------------------------------------------------
+
   _rebuild() {
     if (this._rebuilding) return;
     this._rebuilding = true;
     try {
+      // Drain reuse pool
+      for (const item of this._reusePool) {
+        item.destroy();
+      }
+      this._reusePool = [];
+
       for (const item of this._delegateItems) {
         if (item) item.destroy();
       }
@@ -4040,7 +4144,9 @@ class ListView extends Flickable {
       const count = _modelCount(this.model);
       this._delegateItems = new Array(count).fill(null);
 
+      this._setPropertyValue('count', count);
       this._setPropertyValue('contentHeight', this._totalContentHeight());
+      this._positionFooter();
       this._updateVirtualization();
     } finally {
       this._rebuilding = false;
@@ -4050,21 +4156,28 @@ class ListView extends Flickable {
   _updateVirtualization() {
     const count = _modelCount(this.model);
     if (count === 0 || !(this.delegate instanceof Component)) {
-      this._setPropertyValue('contentHeight', 0);
+      this._setPropertyValue('count', 0);
+      this._setPropertyValue('contentHeight', this._headerHeight() + this._footerHeight());
+      this._positionFooter();
       return;
     }
 
+    this._setPropertyValue('count', count);
     this._setPropertyValue('contentHeight', this._totalContentHeight());
+    this._positionFooter();
 
     const viewH = this.height || 0;
     const contentY = Math.max(0, this.contentY || 0);
     const buffer = this.cacheBuffer || 0;
     const rowH = this._rowHeight();
+    const headerH = this._headerHeight();
 
-    const firstVisible = Math.max(0, Math.floor((contentY - buffer) / rowH));
+    // Visible range is relative to delegate area (after header)
+    const delegateOffset = contentY - headerH;
+    const firstVisible = Math.max(0, Math.floor((delegateOffset - buffer) / rowH));
     const lastVisible = Math.min(
       count - 1,
-      Math.ceil((contentY + viewH + buffer) / rowH),
+      Math.ceil((delegateOffset + viewH + buffer) / rowH),
     );
 
     // Ensure sparse array is large enough
@@ -4072,11 +4185,16 @@ class ListView extends Flickable {
       this._delegateItems.length = count;
     }
 
-    // Destroy items outside visible range
+    // Pool or destroy items outside visible range
     for (let i = 0; i < this._delegateItems.length; i++) {
       const item = this._delegateItems[i];
       if (item && (i < firstVisible || i > lastVisible)) {
-        item.destroy();
+        if (this._reusePool.length < this._maxPoolSize) {
+          item.visible = false;
+          this._reusePool.push(item);
+        } else {
+          item.destroy();
+        }
         this._delegateItems[i] = null;
       }
     }
@@ -4087,7 +4205,7 @@ class ListView extends Flickable {
     // translate automatically via _getContentOffset().
     for (let i = firstVisible; i <= lastVisible && i < count; i++) {
       if (!this._delegateItems[i]) {
-        this._delegateItems[i] = this._createDelegateAt(i);
+        this._delegateItems[i] = this._reuseOrCreateDelegateAt(i);
         // Measure height from first item
         if (i === 0 && this._delegateItems[i]) {
           const h = this._delegateItems[i].height || this._delegateItems[i].implicitHeight || 40;
@@ -4097,15 +4215,30 @@ class ListView extends Flickable {
           }
         }
       }
-      const item = this._delegateItems[i];
-      if (item) {
-        // Logical (content-space) position – Flickable scrolls by translating
-        // all children by -contentY in the renderer.
-        item.y = i * this._rowHeight();
-        item.x = 0;
-      }
+      this._positionDelegateItem(i);
+    }
+
+    // Keep currentItem reference in sync after virtualization
+    const ci = this.currentIndex;
+    if (ci >= 0 && ci < count) {
+      this._setPropertyValue('currentItem', this._delegateItems[ci] ?? null);
+    }
+
+    this._updateAtBounds();
+    this._updateHighlight();
+  }
+
+  _positionDelegateItem(i) {
+    const item = this._delegateItems[i];
+    if (item) {
+      item.y = this._headerHeight() + i * this._rowHeight();
+      item.x = 0;
     }
   }
+
+  // -----------------------------------------------------------------------
+  // Delegate creation with reuse pool
+  // -----------------------------------------------------------------------
 
   _createDelegateAt(index) {
     const delegate = this.delegate;
@@ -4120,6 +4253,40 @@ class ListView extends Flickable {
     return delegate.createObject(this, {}, delegateContext, scope);
   }
 
+  _reuseOrCreateDelegateAt(index) {
+    if (this._reusePool.length > 0) {
+      const item = this._reusePool.pop();
+      const model = this.model;
+      const rowData = _modelRowData(model, index);
+      const parentContext = this.getContext();
+      const newContext = _buildDelegateContext(parentContext, model, index, rowData);
+      // Update the item's context and re-evaluate all bindings so that
+      // context-bound expressions (index, modelData, named role props) refresh.
+      item.setContext(newContext);
+      this._reevaluateBindings(item);
+      item.visible = true;
+      return item;
+    }
+    return this._createDelegateAt(index);
+  }
+
+  // Re-evaluate all property bindings on item and its subtree so that
+  // context-derived expressions pick up new context values.
+  _reevaluateBindings(item) {
+    for (const [name, state] of item._propertyBindings.entries()) {
+      for (const disconnect of state.dependencies.values()) {
+        disconnect();
+      }
+      state.dependencies.clear();
+      item._evaluateBinding(name, state);
+    }
+    for (const child of item._children) {
+      if (child instanceof QObject) {
+        this._reevaluateBindings(child);
+      }
+    }
+  }
+
   _onDataChanged(index) {
     const old = this._delegateItems[index];
     if (old) {
@@ -4129,6 +4296,142 @@ class ListView extends Flickable {
     // Will be recreated on next _updateVirtualization call
     this._updateVirtualization();
   }
+
+  // -----------------------------------------------------------------------
+  // Selection / current index
+  // -----------------------------------------------------------------------
+
+  _onCurrentIndexChanged() {
+    const count = _modelCount(this.model);
+    const ci = this.currentIndex;
+    const valid = ci >= 0 && ci < count;
+
+    if (valid) {
+      // Ensure the delegate item for this index exists
+      if (!this._delegateItems[ci] && this.delegate instanceof Component) {
+        if (this._delegateItems.length <= ci) {
+          this._delegateItems.length = ci + 1;
+        }
+        this._delegateItems[ci] = this._reuseOrCreateDelegateAt(ci);
+        this._positionDelegateItem(ci);
+      }
+      this._setPropertyValue('currentItem', this._delegateItems[ci] ?? null);
+    } else {
+      this._setPropertyValue('currentItem', null);
+    }
+
+    if (valid) this._scrollToCurrentIfNeeded();
+    this._updateHighlight();
+  }
+
+  _scrollToCurrentIfNeeded() {
+    const ci = this.currentIndex;
+    if (ci < 0) return;
+    const rowH = this._rowHeight();
+    const itemY = this._headerHeight() + ci * rowH;
+    const itemBottom = itemY + this._delegateHeight;
+    const viewTop = this.contentY || 0;
+    const viewBottom = viewTop + (this.height || 0);
+    if (itemY < viewTop) {
+      this.contentY = this._clampY(itemY);
+    } else if (itemBottom > viewBottom) {
+      this.contentY = this._clampY(itemBottom - (this.height || 0));
+    }
+  }
+
+  // -----------------------------------------------------------------------
+  // Highlight
+  // -----------------------------------------------------------------------
+
+  _onHighlightChanged() {
+    const existing = this.highlightItem;
+    if (existing) {
+      existing.destroy();
+      this._setPropertyValue('highlightItem', null);
+    }
+    const h = this.highlight;
+    let hi = null;
+    if (h instanceof Component) {
+      hi = h.createObject(this, {}, this.getContext(), this.getComponentScope());
+    } else if (h instanceof Item) {
+      hi = h;
+      hi.parentItem = this;
+    }
+    if (hi) {
+      hi.z = -1;  // render behind delegates
+    }
+    this._setPropertyValue('highlightItem', hi);
+    this._updateHighlight();
+  }
+
+  _updateHighlight() {
+    const hi = this.highlightItem;
+    if (!hi || !this.highlightFollowsCurrentItem) return;
+    const ci = this.currentIndex;
+    if (ci < 0 || ci >= _modelCount(this.model)) {
+      hi.visible = false;
+      return;
+    }
+    hi.y = this._headerHeight() + ci * this._rowHeight();
+    hi.x = 0;
+    hi.width = this.width || 0;
+    hi.height = this._delegateHeight;
+    hi.visible = true;
+  }
+
+  // -----------------------------------------------------------------------
+  // Keyboard navigation
+  // -----------------------------------------------------------------------
+
+  _handleListViewKey(event) {
+    const count = _modelCount(this.model);
+    if (count === 0) return;
+    const current = this.currentIndex;
+
+    if (event.key === 'ArrowDown') {
+      const next = current < 0 ? 0 : Math.min(count - 1, current + 1);
+      if (next !== current) {
+        this.currentIndex = next;
+        event.accepted = true;
+      }
+    } else if (event.key === 'ArrowUp') {
+      const next = current < 0 ? 0 : Math.max(0, current - 1);
+      if (next !== current) {
+        this.currentIndex = next;
+        event.accepted = true;
+      }
+    } else if (event.key === 'PageDown') {
+      const viewRows = Math.max(1, Math.floor((this.height || 0) / this._rowHeight()));
+      const next = Math.min(count - 1, (current < 0 ? 0 : current) + viewRows);
+      if (next !== current) {
+        this.currentIndex = next;
+        event.accepted = true;
+      }
+    } else if (event.key === 'PageUp') {
+      const viewRows = Math.max(1, Math.floor((this.height || 0) / this._rowHeight()));
+      const next = Math.max(0, current - viewRows);
+      if (next !== current) {
+        this.currentIndex = next;
+        event.accepted = true;
+      }
+    }
+  }
+
+  // -----------------------------------------------------------------------
+  // Boundary flags
+  // -----------------------------------------------------------------------
+
+  _updateAtBounds() {
+    const minY = this._minContentY();
+    const maxY = this._maxContentY();
+    const y = this.contentY || 0;
+    this._setPropertyValue('atYBegin', y <= minY);
+    this._setPropertyValue('atYEnd', maxY <= 0 || y >= maxY);
+  }
+
+  // -----------------------------------------------------------------------
+  // Public API
+  // -----------------------------------------------------------------------
 
   // Return number of currently created (non-null) delegate items
   get createdCount() {
@@ -4143,15 +4446,33 @@ class ListView extends Flickable {
     const count = _modelCount(this.model);
     if (index < 0 || index >= count) return;
     const rowH = this._rowHeight();
-    this.contentY = this._clampY(index * rowH);
+    this.contentY = this._clampY(this._headerHeight() + index * rowH);
   }
 
   destroy() {
     this._disconnectModel();
+    // Drain reuse pool
+    for (const item of this._reusePool) {
+      item.destroy();
+    }
+    this._reusePool = [];
     for (const item of this._delegateItems) {
       if (item) item.destroy();
     }
     this._delegateItems = [];
+    if (this._headerItem) {
+      this._headerItem.destroy();
+      this._headerItem = null;
+    }
+    if (this._footerItem) {
+      this._footerItem.destroy();
+      this._footerItem = null;
+    }
+    const hi = this.highlightItem;
+    if (hi) {
+      hi.destroy();
+      this._setPropertyValue('highlightItem', null);
+    }
     super.destroy();
   }
 }
