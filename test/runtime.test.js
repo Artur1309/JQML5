@@ -1587,25 +1587,35 @@ test('CheckBox toggles via Space/Enter keyboard when focused', () => {
   assert.equal(cb.checked, false);
 });
 
-test('Slider clamps value to [from, to] range', () => {
+test('Slider clamps value to [from, to] range via public property', () => {
   const slider = new Slider();
   slider.from = 0;
   slider.to = 100;
 
-  assert.equal(slider._clamp(-10), 0);
-  assert.equal(slider._clamp(150), 100);
-  assert.equal(slider._clamp(50), 50);
+  slider.value = -10;
+  assert.equal(slider.value, 0);
+
+  slider.value = 150;
+  assert.equal(slider.value, 100);
+
+  slider.value = 50;
+  assert.equal(slider.value, 50);
 });
 
-test('Slider stepSize snaps value', () => {
+test('Slider stepSize snaps value via public property', () => {
   const slider = new Slider();
   slider.from = 0;
   slider.to = 10;
   slider.stepSize = 2;
 
-  assert.equal(slider._clamp(3), 4);   // rounds to nearest step (4)
-  assert.equal(slider._clamp(5), 6);   // rounds to nearest step (6)
-  assert.equal(slider._clamp(1.1), 2); // rounds up to step 2
+  slider.value = 3;    // rounds to nearest even step → 4
+  assert.equal(slider.value, 4);
+
+  slider.value = 5;    // rounds to nearest even step → 6
+  assert.equal(slider.value, 6);
+
+  slider.value = 1.1;  // rounds to nearest step → 2
+  assert.equal(slider.value, 2);
 });
 
 test('Slider drag math: value computed from pointer position', () => {
@@ -1624,9 +1634,9 @@ test('Slider drag math: value computed from pointer position', () => {
   const scene = new Scene({ rootItem: root });
   // Track goes from x=12 to x=188; click exactly in the middle => x=100 => pos=(100-12)/(188-12)=0.5
   scene.dispatchPointer('down', 100, 12);
-  const expected = slider._clamp(slider.from + 0.5 * (slider.to - slider.from));
-  assert.ok(Math.abs(slider.value - expected) < 0.01,
-    `Expected value ≈ ${expected}, got ${slider.value}`);
+  // Value should be approximately 0.5 (midpoint)
+  assert.ok(Math.abs(slider.value - 0.5) < 0.01,
+    `Expected value ≈ 0.5, got ${slider.value}`);
 });
 
 test('Slider adjusts value via arrow keys when focused', () => {

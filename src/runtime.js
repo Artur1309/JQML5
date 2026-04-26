@@ -3369,7 +3369,21 @@ class Slider extends Item {
 
     this.defineProperty('from', options.from ?? 0);
     this.defineProperty('to', options.to ?? 1);
-    this.defineProperty('value', options.value ?? 0);
+    this.defineProperty('value', options.value ?? 0, {
+      coerce: (val) => {
+        const from = typeof this.from === 'number' ? this.from : 0;
+        const to = typeof this.to === 'number' ? this.to : 1;
+        const step = typeof this.stepSize === 'number' ? this.stepSize : 0;
+        const lo = Math.min(from, to);
+        const hi = Math.max(from, to);
+        let v = Math.max(lo, Math.min(hi, typeof val === 'number' ? val : 0));
+        if (step > 0) {
+          v = Math.round((v - from) / step) * step + from;
+          v = Math.max(lo, Math.min(hi, v));
+        }
+        return v;
+      },
+    });
     this.defineProperty('stepSize', options.stepSize ?? 0);
 
     this.activeFocusOnTab = true;
