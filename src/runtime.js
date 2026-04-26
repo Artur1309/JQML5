@@ -2326,6 +2326,7 @@ class ListModel extends QObject {
 
   setProperty(index, role, value) {
     if (index < 0 || index >= this._rows.length) return;
+    if (role === '__proto__' || role === 'constructor' || role === 'prototype') return;
     this._rows[index][role] = value;
     this.dataChanged.emit(index, [role]);
   }
@@ -2356,7 +2357,11 @@ function _buildDelegateContext(parentContext, model, index, rowData) {
     modelData: rowData,
   };
   if (rowData !== null && typeof rowData === 'object') {
-    Object.assign(contextValues, rowData);
+    for (const key of Object.keys(rowData)) {
+      if (key !== '__proto__' && key !== 'constructor' && key !== 'prototype') {
+        contextValues[key] = rowData[key];
+      }
+    }
   }
   return new Context(parentContext, contextValues);
 }

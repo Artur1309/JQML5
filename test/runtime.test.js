@@ -893,10 +893,11 @@ test('ListView creates delegates for visible range', () => {
   listView.model = model;
   listView.delegate = delegate;
 
-  // With height=200 and rowHeight=40, visible range is ~5 items
-  // with default cacheBuffer of 40, up to 7 items may be created
+  // With height=200, rowHeight=40, cacheBuffer=40:
+  // firstVisible = max(0, floor((0-40)/40)) = 0
+  // lastVisible = min(19, ceil((0+200+40)/40)) = min(19, 6) = 6 → 7 items (0..6)
   const created = listView.createdCount;
-  assert.ok(created >= 5 && created <= 10, `Expected 5-10 items created, got ${created}`);
+  assert.equal(created, 7, `Expected exactly 7 items created, got ${created}`);
 });
 
 test('ListView virtualization: scrolling changes which items are created', () => {
