@@ -85,6 +85,9 @@ const RUNTIME_TYPES = [
   ['CheckBox', { kind: 'runtime', runtimeExport: 'CheckBox', category: 'controls', isItem: true }],
   // Stage E: rendering improvements
   ['Image', { kind: 'runtime', runtimeExport: 'Image', category: 'quick', isItem: true }],
+  // Stage D: grouped property block pseudo-types (lowercase; expanded inline in codegen)
+  ['border', { kind: 'grouped-block', runtimeExport: null, category: 'quick-grouped' }],
+  ['font', { kind: 'grouped-block', runtimeExport: null, category: 'quick-grouped' }],
 ];
 
 function createDefaultRegistries() {
@@ -110,6 +113,11 @@ function createDefaultRegistries() {
   });
   modules.registerModule('QtQuick.Controls', {
     listTypes: () => ['Button', 'Label', 'TextField', 'Slider', 'CheckBox'],
+  });
+  // QtQuick.Layouts: no additional runtime types yet; Layout.* attached properties
+  // are handled by the codegen property loop and stored in object.__layoutAttached.
+  modules.registerModule('QtQuick.Layouts', {
+    listTypes: () => [],
   });
 
   return {

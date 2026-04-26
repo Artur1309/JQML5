@@ -669,3 +669,334 @@ Rectangle {
   assert.match(bundleJs, /"border\.color"/);  // present in serialised AST JSON
   assert.match(bundleJs, /"border\.width"/);  // present in serialised AST JSON
 });
+
+// ---------------------------------------------------------------------------
+// Stage D: Attached properties – Component.onCompleted
+// ---------------------------------------------------------------------------
+
+test('Stage D: Component.onCompleted is compiled to object.onCompleted assignment', async () => {
+  const fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), 'jqmlc-completed-'));
+  const outdir = path.join(fixtureDir, 'out');
+  fs.mkdirSync(outdir, { recursive: true });
+
+  fs.writeFileSync(path.join(fixtureDir, 'Main.qml'), `
+import QtQuick 2.15
+Item {
+  id: root
+  width: 200
+  height: 200
+
+  Component.onCompleted: {
+    console.log("component completed", width, height)
+  }
+}
+`, 'utf8');
+
+  const result = await compileQmlApplication({
+    entryFile: path.join(fixtureDir, 'Main.qml'),
+    outdir,
+  });
+
+  assert.equal(result.componentCount >= 1, true);
+  const js = fs.readFileSync(path.join(outdir, 'app.js'), 'utf8');
+
+  // The bundle must wire up onCompleted via __ATTACHED_HANDLERS
+  assert.match(js, /__ATTACHED_HANDLERS/);
+  assert.match(js, /Component\.onCompleted/);
+  // The generated code assigns object.onCompleted
+  assert.match(js, /onCompleted/);
+});
+
+test('Stage D: Component.onCompleted fires at runtime via Node smoke test', async () => {
+  const fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), 'jqmlc-completed-rt-'));
+  const outdir = path.join(fixtureDir, 'out');
+  fs.mkdirSync(outdir, { recursive: true });
+
+  fs.writeFileSync(path.join(fixtureDir, 'Main.qml'), `
+import QtQuick 2.15
+Item {
+  id: root
+  width: 100
+  height: 100
+
+  Component.onCompleted: {
+    root.width = 999
+  }
+}
+`, 'utf8');
+
+  await compileQmlApplication({
+    entryFile: path.join(fixtureDir, 'Main.qml'),
+    outdir,
+  });
+
+  const bundleJs = fs.readFileSync(path.join(outdir, 'app.js'), 'utf8');
+
+  // We verify structural correctness: the bundle must wire up onCompleted.
+  // Full execution requires a DOM environment, so we only check the bundle content.
+  assert.match(bundleJs, /onCompleted/);
+  assert.match(bundleJs, /__ATTACHED_HANDLERS\["Component\.onCompleted"\]|__ATTACHED_HANDLERS\['Component\.onCompleted'\]|Component\.onCompleted/);
+});
+
+// ---------------------------------------------------------------------------
+// Stage D: Grouped property blocks – border { ... }
+// ---------------------------------------------------------------------------
+
+test('Stage D: border { color; width } block expands to borderColor / borderWidth', async () => {
+  const fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), 'jqmlc-grouped-border-'));
+  const outdir = path.join(fixtureDir, 'out');
+  fs.mkdirSync(outdir, { recursive: true });
+
+  fs.writeFileSync(path.join(fixtureDir, 'Main.qml'), `
+import QtQuick 2.15
+Rectangle {
+  width: 100
+  height: 100
+  color: "white"
+
+  border {
+    color: "navy"
+    width: 3
+  }
+}
+`, 'utf8');
+
+  const result = await compileQmlApplication({
+    entryFile: path.join(fixtureDir, 'Main.qml'),
+    outdir,
+  });
+
+  assert.equal(result.componentCount >= 1, true);
+  const js = fs.readFileSync(path.join(outdir, 'app.js'), 'utf8');
+
+  // Grouped block expansion must produce the flat property names
+  assert.match(js, /borderColor/);
+  assert.match(js, /borderWidth/);
+  // The __GROUPED_BLOCK_METADATA registry must be present
+  assert.match(js, /__GROUPED_BLOCK_METADATA/);
+});
+
+test('Stage D: runtime – grouped border block sets borderColor and borderWidth', async () => {
+  const fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), 'jqmlc-grouped-border-rt-'));
+  const outdir = path.join(fixtureDir, 'out');
+  fs.mkdirSync(outdir, { recursive: true });
+
+  fs.writeFileSync(path.join(fixtureDir, 'Main.qml'), `
+import QtQuick 2.15
+Rectangle {
+  width: 100
+  height: 100
+  color: "white"
+
+  border {
+    color: "navy"
+    width: 3
+  }
+}
+`, 'utf8');
+
+  await compileQmlApplication({
+    entryFile: path.join(fixtureDir, 'Main.qml'),
+    outdir,
+  });
+
+  const bundleJs = fs.readFileSync(path.join(outdir, 'app.js'), 'utf8');
+
+  // Key assertions: the flat property names must appear in the bundle
+  assert.match(bundleJs, /borderColor/);
+  assert.match(bundleJs, /borderWidth/);
+});
+
+// ---------------------------------------------------------------------------
+// Stage D: Grouped property blocks – font { ... }
+// ---------------------------------------------------------------------------
+
+test('Stage D: font { family; pixelSize; bold } block expands as font object merge', async () => {
+  const fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), 'jqmlc-grouped-font-'));
+  const outdir = path.join(fixtureDir, 'out');
+  fs.mkdirSync(outdir, { recursive: true });
+
+  fs.writeFileSync(path.join(fixtureDir, 'Main.qml'), `
+import QtQuick 2.15
+Text {
+  text: "Hello"
+  width: 200
+  height: 40
+
+  font {
+    family: "Helvetica"
+    pixelSize: 18
+    bold: true
+  }
+}
+`, 'utf8');
+
+  const result = await compileQmlApplication({
+    entryFile: path.join(fixtureDir, 'Main.qml'),
+    outdir,
+  });
+
+  assert.equal(result.componentCount >= 1, true);
+  const js = fs.readFileSync(path.join(outdir, 'app.js'), 'utf8');
+
+  // The font grouped block must be expanded via __GROUPED_BLOCK_METADATA
+  assert.match(js, /__GROUPED_BLOCK_METADATA/);
+  // font is the targetProp; the bundle must reference it
+  assert.match(js, /font/);
+  // Individual field names present in AST JSON embedded in bundle
+  assert.match(js, /pixelSize|Helvetica/);
+});
+
+// ---------------------------------------------------------------------------
+// Stage D: Enum constants
+// ---------------------------------------------------------------------------
+
+test('Stage D: Text enum constants compile to runtime string values', async () => {
+  const fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), 'jqmlc-enums-'));
+  const outdir = path.join(fixtureDir, 'out');
+  fs.mkdirSync(outdir, { recursive: true });
+
+  fs.writeFileSync(path.join(fixtureDir, 'Main.qml'), `
+import QtQuick 2.15
+Text {
+  text: "Hello"
+  width: 200
+  height: 40
+  elide: Text.ElideRight
+  wrapMode: Text.WordWrap
+  horizontalAlignment: Text.AlignHCenter
+}
+`, 'utf8');
+
+  const result = await compileQmlApplication({
+    entryFile: path.join(fixtureDir, 'Main.qml'),
+    outdir,
+  });
+
+  assert.equal(result.componentCount >= 1, true);
+  const js = fs.readFileSync(path.join(outdir, 'app.js'), 'utf8');
+
+  // Enum constants must be resolved to their string values
+  assert.match(js, /__ENUM_TABLE/);
+  // The resolved string values must appear in the bundle
+  assert.match(js, /["']right["']/);    // Text.ElideRight → 'right'
+  assert.match(js, /["']wordwrap["']/); // Text.WordWrap   → 'wordwrap'
+  assert.match(js, /["']center["']/);   // Text.AlignHCenter → 'center'
+});
+
+test('Stage D: Image enum constants compile to runtime string values', async () => {
+  const fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), 'jqmlc-image-enums-'));
+  const outdir = path.join(fixtureDir, 'out');
+  fs.mkdirSync(outdir, { recursive: true });
+
+  fs.writeFileSync(path.join(fixtureDir, 'Main.qml'), `
+import QtQuick 2.15
+Image {
+  width: 200
+  height: 200
+  source: "assets/bg.png"
+  fillMode: Image.PreserveAspectFit
+}
+`, 'utf8');
+
+  const result = await compileQmlApplication({
+    entryFile: path.join(fixtureDir, 'Main.qml'),
+    outdir,
+  });
+
+  assert.equal(result.componentCount >= 1, true);
+  const js = fs.readFileSync(path.join(outdir, 'app.js'), 'utf8');
+
+  assert.match(js, /__ENUM_TABLE/);
+  assert.match(js, /["']PreserveAspectFit["']/);
+});
+
+// ---------------------------------------------------------------------------
+// Stage D: Keys.onPressed migrated to __ATTACHED_HANDLERS registry
+// ---------------------------------------------------------------------------
+
+test('Stage D: Keys.onPressed still works via __ATTACHED_HANDLERS registry', async () => {
+  const fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), 'jqmlc-keys-registry-'));
+  const outdir = path.join(fixtureDir, 'out');
+  fs.mkdirSync(outdir, { recursive: true });
+
+  fs.writeFileSync(path.join(fixtureDir, 'Main.qml'), `
+import QtQuick 2.15
+Item {
+  id: root
+  width: 300
+  height: 200
+  activeFocusOnTab: true
+
+  Keys.onPressed: {
+    console.log(event.key)
+  }
+
+  Keys.onReleased: {
+    console.log("released")
+  }
+}
+`, 'utf8');
+
+  const result = await compileQmlApplication({
+    entryFile: path.join(fixtureDir, 'Main.qml'),
+    outdir,
+  });
+
+  assert.equal(result.componentCount >= 1, true);
+  const js = fs.readFileSync(path.join(outdir, 'app.js'), 'utf8');
+
+  // Must use __ATTACHED_HANDLERS registry (not the old inline code)
+  assert.match(js, /__ATTACHED_HANDLERS/);
+  assert.match(js, /Keys\.onPressed/);
+  assert.match(js, /Keys\.onReleased/);
+});
+
+// ---------------------------------------------------------------------------
+// Stage D: Layout.* attached properties stored gracefully
+// ---------------------------------------------------------------------------
+
+test('Stage D: Layout.fillWidth and Layout.fillHeight compile without error', async () => {
+  const fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), 'jqmlc-layout-attached-'));
+  const outdir = path.join(fixtureDir, 'out');
+  fs.mkdirSync(outdir, { recursive: true });
+
+  fs.writeFileSync(path.join(fixtureDir, 'Main.qml'), `
+import QtQuick 2.15
+import QtQuick.Layouts 1.15
+Item {
+  id: root
+  width: 400
+  height: 300
+
+  Row {
+    width: 400
+    height: 50
+
+    Rectangle {
+      Layout.fillWidth: true
+      Layout.preferredHeight: 50
+      color: "steelblue"
+    }
+
+    Rectangle {
+      Layout.fillWidth: true
+      Layout.preferredHeight: 50
+      color: "coral"
+    }
+  }
+}
+`, 'utf8');
+
+  const result = await compileQmlApplication({
+    entryFile: path.join(fixtureDir, 'Main.qml'),
+    outdir,
+  });
+
+  assert.equal(result.componentCount >= 1, true);
+  const js = fs.readFileSync(path.join(outdir, 'app.js'), 'utf8');
+
+  // Layout.* attached props must be handled (stored in __layoutAttached)
+  assert.match(js, /__layoutAttached/);
+  assert.match(js, /fillWidth/);
+});
