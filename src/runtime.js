@@ -1956,7 +1956,9 @@ class Keys {
     this.onPressed = null;
     this.onReleased = null;
     this.enabled = true;
-    this.priority = 'BeforeItem'; // 'BeforeItem' | 'AfterChildren'
+    // priority mirrors Qt Quick Keys.priority: 'BeforeItem' | 'AfterChildren'
+    // Currently informational only; reserved for future handler-ordering support.
+    this.priority = 'BeforeItem';
   }
 }
 

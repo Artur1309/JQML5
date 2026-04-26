@@ -36,8 +36,8 @@ Item {
     focusable: true
 
     Keys.onPressed: {
-      if (event.key === "ArrowRight") { boxA.x = Math.min(boxA.x + 10, 600); event.accepted = true; }
-      if (event.key === "ArrowLeft")  { boxA.x = Math.max(boxA.x - 10, 0);   event.accepted = true; }
+      if (event.key === "ArrowRight") { boxA.x = Math.min(boxA.x + 10, root.width - boxA.width - 40); event.accepted = true; }
+      if (event.key === "ArrowLeft")  { boxA.x = Math.max(boxA.x - 10, 0);                             event.accepted = true; }
     }
 
     TapHandler {
@@ -64,8 +64,8 @@ Item {
     focusable: true
 
     Keys.onPressed: {
-      if (event.key === "ArrowUp")   { boxB.y = Math.max(boxB.y - 10, 0);   event.accepted = true; }
-      if (event.key === "ArrowDown") { boxB.y = Math.min(boxB.y + 10, 380); event.accepted = true; }
+      if (event.key === "ArrowUp")   { boxB.y = Math.max(boxB.y - 10, 0);                              event.accepted = true; }
+      if (event.key === "ArrowDown") { boxB.y = Math.min(boxB.y + 10, root.height - boxB.height - 20); event.accepted = true; }
     }
 
     TapHandler {
