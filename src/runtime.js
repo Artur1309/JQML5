@@ -4257,7 +4257,6 @@ class ListView extends Flickable {
     super(options);
 
     this._delegateItems = [];        // sparse array of created delegate instances
-    this._delegateHeight = 40;       // measured/default row height
     this._modelDisconnectors = [];
     this._rebuilding = false;
 
@@ -4269,6 +4268,21 @@ class ListView extends Flickable {
     this._reusePool = [];
     this._maxPoolSize = 20;
 
+    // Variable-size cache: _sizeCache[i] = measured size (height for vertical,
+    // width for horizontal) of delegate at index i.  Undefined means "use default".
+    this._sizeCache = [];
+    // Default size estimate used for unmeasured items. Updated from the first
+    // measured item (mirroring old _delegateHeight behaviour).
+    // Also settable as `lv._delegateHeight = N` for backwards compatibility.
+    this._defaultDelegateSize = 40;
+
+    // Prefix-sum array: _prefixSums[i] = position offset of item i in content space.
+    // _prefixSums[count] = total delegate area including trailing spacing removed.
+    this._prefixSums = [0];
+
+    // Disconnector functions for size-change listeners on live delegate items.
+    this._sizeDisconnectors = [];  // indexed by delegate index
+
     this.defineProperty('model', null);
     // reuseItems controls whether offscreen delegates are pooled for reuse
     // (false by default, matching desktop QtQuick behaviour).
@@ -4276,6 +4290,14 @@ class ListView extends Flickable {
     this.defineProperty('delegate', null);
     this.defineProperty('spacing', 0);
     this.defineProperty('cacheBuffer', 40);  // extra pixels above/below to pre-create
+
+    // Orientation: 'vertical' (default) stacks items top-to-bottom;
+    // 'horizontal' stacks items left-to-right.
+    this.defineProperty('orientation', options.orientation ?? 'vertical');
+    // Sync flickableDirection with initial orientation.
+    if ((options.orientation ?? 'vertical') === 'horizontal') {
+      this.flickableDirection = 'HorizontalFlick';
+    }
 
     // Selection / current
     this.defineProperty('currentIndex', -1);
@@ -4298,19 +4320,33 @@ class ListView extends Flickable {
     // ListView is focusable so it can receive keyboard events
     this.focusable = true;
 
-    // Delegate reuse signals (QtQuick parity)
-    this.defineSignal('pooled');   // pooled(item, index) – item moved into pool
-    this.defineSignal('reused');   // reused(item, index) – item taken from pool and re-bound
+    // Delegate reuse signals – kept for backwards compatibility.
+    // Primary Qt-like path: ListView.onPooled / ListView.onReused attached
+    // handlers on the delegate item (see _invokeAttachedHandler).
+    this.defineSignal('pooled');   // pooled(item, index)
+    this.defineSignal('reused');   // reused(item, index)
 
-    // contentY / contentHeight are inherited from Flickable.
-    // Re-connect virtualization to the inherited signal:
+    // Wire up change listeners
     this.connect('modelChanged', (newModel, oldModel) => this._onModelReplaced(newModel, oldModel));
     this.connect('delegateChanged', () => this._rebuild());
+    this.connect('orientationChanged', () => {
+      // Adjust flickableDirection to match the new orientation.
+      this.flickableDirection = this._isVertical() ? 'VerticalFlick' : 'HorizontalFlick';
+      this._rebuild();
+    });
     this.connect('contentYChanged', () => {
       this._updateVirtualization();
       this._updateAtBounds();
     });
+    this.connect('contentXChanged', () => {
+      this._updateVirtualization();
+      this._updateAtBounds();
+    });
     this.connect('heightChanged', () => {
+      this._updateVirtualization();
+      this._updateAtBounds();
+    });
+    this.connect('widthChanged', () => {
       this._updateVirtualization();
       this._updateAtBounds();
     });
@@ -4319,30 +4355,160 @@ class ListView extends Flickable {
     this.connect('headerChanged', () => this._onHeaderFooterChanged('header'));
     this.connect('footerChanged', () => this._onHeaderFooterChanged('footer'));
 
-    // Keyboard navigation: ArrowUp/Down, PageUp/Down
+    // Keyboard navigation: ArrowUp/Down/Left/Right, PageUp/Down
     this.keys.onPressed = (event) => this._handleListViewKey(event);
 
+    if (options.orientation !== undefined) this.orientation = options.orientation;
     if (options.model !== undefined) this.model = options.model;
     if (options.delegate !== undefined) this.delegate = options.delegate;
     if (options.contentY !== undefined) this.contentY = options.contentY;
+    if (options.contentX !== undefined) this.contentX = options.contentX;
+  }
+
+  // -----------------------------------------------------------------------
+  // Backwards-compat: _delegateHeight getter/setter maps to _defaultDelegateSize
+  // -----------------------------------------------------------------------
+
+  get _delegateHeight() { return this._defaultDelegateSize; }
+  set _delegateHeight(v) { this._defaultDelegateSize = v; }
+
+  // -----------------------------------------------------------------------
+  // Orientation helpers
+  // -----------------------------------------------------------------------
+
+  _isVertical() {
+    return (this.orientation || 'vertical') === 'vertical';
+  }
+
+  // Returns the "main-axis" size of a created delegate item.
+  _getItemMainSize(item) {
+    if (this._isVertical()) {
+      return item.height || item.implicitHeight || this._defaultDelegateSize;
+    }
+    return item.width || item.implicitWidth || this._defaultDelegateSize;
+  }
+
+  // Returns the cached size for index i, falling back to the default.
+  _getDelegateSize(i) {
+    const s = this._sizeCache[i];
+    return (s !== undefined && s > 0) ? s : this._defaultDelegateSize;
+  }
+
+  // -----------------------------------------------------------------------
+  // Prefix-sum helpers (variable-size virtualization)
+  // -----------------------------------------------------------------------
+
+  // Rebuild the full prefix-sum array from _sizeCache.
+  // _prefixSums[i] = position offset (start) of item i in the delegate content area.
+  // _prefixSums[count] = totalDelegateSize + spacing (used for total-size calc).
+  _buildPrefixSums() {
+    const count = _modelCount(this.model);
+    const sp = this.spacing || 0;
+    const ps = new Array(count + 1);
+    ps[0] = 0;
+    for (let i = 0; i < count; i++) {
+      ps[i + 1] = ps[i] + this._getDelegateSize(i) + sp;
+    }
+    this._prefixSums = ps;
+  }
+
+  // Position offset (start of item i) in delegate content area.
+  _offsetAtIndex(i) {
+    if (i <= 0) return 0;
+    if (i < this._prefixSums.length) return this._prefixSums[i];
+    // Extend on-the-fly if prefix sums haven't been fully built yet.
+    const last = this._prefixSums.length > 0
+      ? this._prefixSums[this._prefixSums.length - 1]
+      : 0;
+    const missing = i - (this._prefixSums.length - 1);
+    return last + missing * (this._defaultDelegateSize + (this.spacing || 0));
+  }
+
+  // Binary search: returns the last index i such that _prefixSums[i] <= offset.
+  // This is the index of the item whose start position <= offset.
+  _indexAtOffset(offset) {
+    const count = _modelCount(this.model);
+    if (count === 0) return 0;
+    if (offset <= 0) return 0;
+    const ps = this._prefixSums;
+    let lo = 0;
+    let hi = count - 1;
+    while (lo < hi) {
+      const mid = (lo + hi + 1) >> 1;
+      if (ps[mid] <= offset) {
+        lo = mid;
+      } else {
+        hi = mid - 1;
+      }
+    }
+    return lo;
+  }
+
+  // Total size occupied by all delegates (including inter-item spacing, excluding trailing).
+  _totalDelegateSize() {
+    const count = _modelCount(this.model);
+    if (count === 0) return 0;
+    const sp = this.spacing || 0;
+    // _prefixSums[count] = sum of (size + spacing) for all items.
+    // Subtract one trailing spacing.
+    if (this._prefixSums.length > count) {
+      return this._prefixSums[count] - sp;
+    }
+    // Fallback: sum directly
+    let s = 0;
+    for (let i = 0; i < count; i++) {
+      s += this._getDelegateSize(i);
+      if (i < count - 1) s += sp;
+    }
+    return s;
+  }
+
+  // -----------------------------------------------------------------------
+  // Attached handler support (Qt-like ListView.onPooled / ListView.onReused)
+  // -----------------------------------------------------------------------
+
+  // Returns (creating if needed) the _listViewAttached bag on a delegate item.
+  static _getAttached(item) {
+    if (!item._listViewAttached) {
+      item._listViewAttached = { onPooled: null, onReused: null };
+    }
+    return item._listViewAttached;
+  }
+
+  // Invoke an attached handler (0 args, called with item as `this`).
+  static _invokeAttachedHandler(item, handlerName) {
+    const bag = item._listViewAttached;
+    if (!bag) return;
+    const fn = bag[handlerName];
+    if (typeof fn === 'function') fn.call(item);
   }
 
   // Alias: viewportHeight reads height
   get viewportHeight() {
-    return this.height;
+    return this._isVertical() ? (this.height || 0) : (this.width || 0);
   }
 
   // -----------------------------------------------------------------------
   // Header / footer helpers
   // -----------------------------------------------------------------------
 
-  _headerHeight() {
-    return this._headerItem ? (this._headerItem.height || 0) : 0;
+  _headerSize() {
+    if (!this._headerItem) return 0;
+    return this._isVertical()
+      ? (this._headerItem.height || 0)
+      : (this._headerItem.width || 0);
   }
 
-  _footerHeight() {
-    return this._footerItem ? (this._footerItem.height || 0) : 0;
+  _footerSize() {
+    if (!this._footerItem) return 0;
+    return this._isVertical()
+      ? (this._footerItem.height || 0)
+      : (this._footerItem.width || 0);
   }
+
+  // Keep backwards-compat aliases used by Flickable internals
+  _headerHeight() { return this._isVertical() ? this._headerSize() : 0; }
+  _footerHeight()  { return this._isVertical() ? this._footerSize() : 0; }
 
   _onHeaderFooterChanged(which) {
     const isHeader = which === 'header';
@@ -4360,8 +4526,13 @@ class ListView extends Flickable {
       created.parentItem = this;
     }
     if (created) {
-      created.x = 0;
-      created.y = isHeader ? 0 : this._headerHeight() + this._totalDelegateHeight();
+      if (this._isVertical()) {
+        created.x = 0;
+        created.y = isHeader ? 0 : this._headerSize() + this._totalDelegateSize();
+      } else {
+        created.y = 0;
+        created.x = isHeader ? 0 : this._headerSize() + this._totalDelegateSize();
+      }
     }
     if (isHeader) this._headerItem = created;
     else this._footerItem = created;
@@ -4370,10 +4541,22 @@ class ListView extends Flickable {
   }
 
   _positionFooter() {
-    if (this._footerItem) {
-      this._footerItem.y = this._headerHeight() + this._totalDelegateHeight();
+    if (!this._footerItem) return;
+    if (this._isVertical()) {
+      this._footerItem.y = this._headerSize() + this._totalDelegateSize();
       this._footerItem.x = 0;
+    } else {
+      this._footerItem.x = this._headerSize() + this._totalDelegateSize();
+      this._footerItem.y = 0;
     }
+  }
+
+  // -----------------------------------------------------------------------
+  // Content size helpers
+  // -----------------------------------------------------------------------
+
+  _totalContentSize() {
+    return this._headerSize() + this._totalDelegateSize() + this._footerSize();
   }
 
   // -----------------------------------------------------------------------
@@ -4406,18 +4589,48 @@ class ListView extends Flickable {
     this._rebuild();
   }
 
-  _rowHeight() {
-    return this._delegateHeight + (this.spacing || 0);
+  // -----------------------------------------------------------------------
+  // Size-change listener helpers
+  // -----------------------------------------------------------------------
+
+  // Connect to size changes on a live delegate so the layout reacts.
+  _connectSizeListener(item, index) {
+    const prop = this._isVertical() ? 'heightChanged' : 'widthChanged';
+    const handler = () => this._onDelegateSizeChanged(index);
+    const disconnect = item.connect(prop, handler);
+    this._sizeDisconnectors[index] = disconnect;
   }
 
-  _totalDelegateHeight() {
-    const count = _modelCount(this.model);
-    if (count === 0) return 0;
-    return count * this._delegateHeight + Math.max(0, count - 1) * (this.spacing || 0);
+  _disconnectSizeListener(index) {
+    const d = this._sizeDisconnectors[index];
+    if (typeof d === 'function') {
+      d();
+      this._sizeDisconnectors[index] = undefined;
+    }
   }
 
-  _totalContentHeight() {
-    return this._headerHeight() + this._totalDelegateHeight() + this._footerHeight();
+  // Called when a live delegate's size changes.
+  _onDelegateSizeChanged(index) {
+    const item = this._delegateItems[index];
+    if (!item) return;
+    const newSize = this._getItemMainSize(item);
+    if (this._sizeCache[index] === newSize) return;  // no actual change
+    this._sizeCache[index] = newSize;
+    this._buildPrefixSums();
+    this._updateContentSize();
+    this._positionAllVisible();
+    this._positionFooter();
+    this._updateHighlight();
+  }
+
+  // Update the Flickable's contentHeight (vertical) or contentWidth (horizontal).
+  _updateContentSize() {
+    const total = this._totalContentSize();
+    if (this._isVertical()) {
+      this._setPropertyValue('contentHeight', total);
+    } else {
+      this._setPropertyValue('contentWidth', total);
+    }
   }
 
   // -----------------------------------------------------------------------
@@ -4428,6 +4641,12 @@ class ListView extends Flickable {
     if (this._rebuilding) return;
     this._rebuilding = true;
     try {
+      // Disconnect all size listeners
+      for (let i = 0; i < this._sizeDisconnectors.length; i++) {
+        this._disconnectSizeListener(i);
+      }
+      this._sizeDisconnectors = [];
+
       // Drain reuse pool
       for (const item of this._reusePool) {
         item.destroy();
@@ -4442,8 +4661,12 @@ class ListView extends Flickable {
       const count = _modelCount(this.model);
       this._delegateItems = new Array(count).fill(null);
 
+      // Reset size cache but keep measured sizes for indices still in range
+      this._sizeCache = new Array(count).fill(undefined);
+
+      this._buildPrefixSums();
       this._setPropertyValue('count', count);
-      this._setPropertyValue('contentHeight', this._totalContentHeight());
+      this._updateContentSize();
       this._positionFooter();
       this._updateVirtualization();
     } finally {
@@ -4455,27 +4678,31 @@ class ListView extends Flickable {
     const count = _modelCount(this.model);
     if (count === 0 || !(this.delegate instanceof Component)) {
       this._setPropertyValue('count', 0);
-      this._setPropertyValue('contentHeight', this._headerHeight() + this._footerHeight());
+      if (this._isVertical()) {
+        this._setPropertyValue('contentHeight', this._headerSize() + this._footerSize());
+      } else {
+        this._setPropertyValue('contentWidth', this._headerSize() + this._footerSize());
+      }
       this._positionFooter();
       return;
     }
 
     this._setPropertyValue('count', count);
-    this._setPropertyValue('contentHeight', this._totalContentHeight());
+    this._updateContentSize();
     this._positionFooter();
 
-    const viewH = this.height || 0;
-    const contentY = Math.max(0, this.contentY || 0);
+    const vert = this._isVertical();
+    const viewSize = vert ? (this.height || 0) : (this.width || 0);
+    const scrollPos = Math.max(0, vert ? (this.contentY || 0) : (this.contentX || 0));
     const buffer = this.cacheBuffer || 0;
-    const rowH = this._rowHeight();
-    const headerH = this._headerHeight();
+    const headerS = this._headerSize();
 
-    // Visible range is relative to delegate area (after header)
-    const delegateOffset = contentY - headerH;
-    const firstVisible = Math.max(0, Math.floor((delegateOffset - buffer) / rowH));
+    // Visible range in delegate content space (after header)
+    const delegateOffset = scrollPos - headerS;
+    const firstVisible = Math.max(0, this._indexAtOffset(Math.max(0, delegateOffset - buffer)));
     const lastVisible = Math.min(
       count - 1,
-      Math.ceil((delegateOffset + viewH + buffer) / rowH),
+      this._indexAtOffset(delegateOffset + viewSize + buffer),
     );
 
     // Ensure sparse array is large enough
@@ -4487,8 +4714,10 @@ class ListView extends Flickable {
     for (let i = 0; i < this._delegateItems.length; i++) {
       const item = this._delegateItems[i];
       if (item && (i < firstVisible || i > lastVisible)) {
+        this._disconnectSizeListener(i);
         if (this.reuseItems && this._reusePool.length < this._maxPoolSize) {
           item.visible = false;
+          ListView._invokeAttachedHandler(item, 'onPooled');
           this.pooled.emit(item, i);
           this._reusePool.push(item);
         } else {
@@ -4500,18 +4729,23 @@ class ListView extends Flickable {
 
     // Create and position items within visible range.
     // Items are placed at their LOGICAL content position (not offset by
-    // contentY) because the Flickable's rendering applies the -contentY
-    // translate automatically via _getContentOffset().
+    // contentY/contentX) because the Flickable applies the translate via
+    // _getContentOffset().
     for (let i = firstVisible; i <= lastVisible && i < count; i++) {
       if (!this._delegateItems[i]) {
         this._delegateItems[i] = this._reuseOrCreateDelegateAt(i);
-        // Measure height from first item
-        if (i === 0 && this._delegateItems[i]) {
-          const h = this._delegateItems[i].height || this._delegateItems[i].implicitHeight || 40;
-          if (h > 0) {
-            this._delegateHeight = h;
-            this._setPropertyValue('contentHeight', this._totalContentHeight());
+        if (this._delegateItems[i]) {
+          // Measure and cache the actual size for this index.
+          const s = this._getItemMainSize(this._delegateItems[i]);
+          if (s > 0 && this._sizeCache[i] !== s) {
+            this._sizeCache[i] = s;
+            // Update the default size estimate from the first measured item so
+            // that unmeasured (off-screen) items use a realistic fallback.
+            if (i === 0) this._defaultDelegateSize = s;
+            this._buildPrefixSums();
+            this._updateContentSize();
           }
+          this._connectSizeListener(this._delegateItems[i], i);
         }
       }
       this._positionDelegateItem(i);
@@ -4527,11 +4761,26 @@ class ListView extends Flickable {
     this._updateHighlight();
   }
 
+  // Re-position all currently-visible items (used after size changes).
+  _positionAllVisible() {
+    for (let i = 0; i < this._delegateItems.length; i++) {
+      if (this._delegateItems[i]) {
+        this._positionDelegateItem(i);
+      }
+    }
+  }
+
   _positionDelegateItem(i) {
     const item = this._delegateItems[i];
-    if (item) {
-      item.y = this._headerHeight() + i * this._rowHeight();
+    if (!item) return;
+    const headerS = this._headerSize();
+    const pos = headerS + this._offsetAtIndex(i);
+    if (this._isVertical()) {
+      item.y = pos;
       item.x = 0;
+    } else {
+      item.x = pos;
+      item.y = 0;
     }
   }
 
@@ -4564,6 +4813,8 @@ class ListView extends Flickable {
       item.setContext(newContext);
       this._reevaluateBindings(item);
       item.visible = true;
+      // Fire attached handler (0 args) then backwards-compat signal.
+      ListView._invokeAttachedHandler(item, 'onReused');
       this.reused.emit(item, index);
       return item;
     }
@@ -4588,10 +4839,15 @@ class ListView extends Flickable {
   }
 
   _onDataChanged(index) {
+    this._disconnectSizeListener(index);
     const old = this._delegateItems[index];
     if (old) {
       old.destroy();
       this._delegateItems[index] = null;
+    }
+    // Clear size cache for this index so it gets re-measured on recreation.
+    if (index < this._sizeCache.length) {
+      this._sizeCache[index] = undefined;
     }
     // Will be recreated on next _updateVirtualization call
     this._updateVirtualization();
@@ -4613,6 +4869,15 @@ class ListView extends Flickable {
           this._delegateItems.length = ci + 1;
         }
         this._delegateItems[ci] = this._reuseOrCreateDelegateAt(ci);
+        if (this._delegateItems[ci]) {
+          const s = this._getItemMainSize(this._delegateItems[ci]);
+          if (s > 0 && this._sizeCache[ci] !== s) {
+            this._sizeCache[ci] = s;
+            this._buildPrefixSums();
+            this._updateContentSize();
+          }
+          this._connectSizeListener(this._delegateItems[ci], ci);
+        }
         this._positionDelegateItem(ci);
       }
       this._setPropertyValue('currentItem', this._delegateItems[ci] ?? null);
@@ -4627,15 +4892,27 @@ class ListView extends Flickable {
   _scrollToCurrentIfNeeded() {
     const ci = this.currentIndex;
     if (ci < 0) return;
-    const rowH = this._rowHeight();
-    const itemY = this._headerHeight() + ci * rowH;
-    const itemBottom = itemY + this._delegateHeight;
-    const viewTop = this.contentY || 0;
-    const viewBottom = viewTop + (this.height || 0);
-    if (itemY < viewTop) {
-      this.contentY = this._clampY(itemY);
-    } else if (itemBottom > viewBottom) {
-      this.contentY = this._clampY(itemBottom - (this.height || 0));
+    const headerS = this._headerSize();
+    const itemStart = headerS + this._offsetAtIndex(ci);
+    const itemSize = this._getDelegateSize(ci);
+    const itemEnd = itemStart + itemSize;
+
+    if (this._isVertical()) {
+      const viewTop = this.contentY || 0;
+      const viewBottom = viewTop + (this.height || 0);
+      if (itemStart < viewTop) {
+        this.contentY = this._clampY(itemStart);
+      } else if (itemEnd > viewBottom) {
+        this.contentY = this._clampY(itemEnd - (this.height || 0));
+      }
+    } else {
+      const viewLeft = this.contentX || 0;
+      const viewRight = viewLeft + (this.width || 0);
+      if (itemStart < viewLeft) {
+        this.contentX = this._clampX(itemStart);
+      } else if (itemEnd > viewRight) {
+        this.contentX = this._clampX(itemEnd - (this.width || 0));
+      }
     }
   }
 
@@ -4672,10 +4949,20 @@ class ListView extends Flickable {
       hi.visible = false;
       return;
     }
-    hi.y = this._headerHeight() + ci * this._rowHeight();
-    hi.x = 0;
-    hi.width = this.width || 0;
-    hi.height = this._delegateHeight;
+    const headerS = this._headerSize();
+    const pos = headerS + this._offsetAtIndex(ci);
+    const size = this._getDelegateSize(ci);
+    if (this._isVertical()) {
+      hi.y = pos;
+      hi.x = 0;
+      hi.width = this.width || 0;
+      hi.height = size;
+    } else {
+      hi.x = pos;
+      hi.y = 0;
+      hi.height = this.height || 0;
+      hi.width = size;
+    }
     hi.visible = true;
   }
 
@@ -4687,33 +4974,29 @@ class ListView extends Flickable {
     const count = _modelCount(this.model);
     if (count === 0) return;
     const current = this.currentIndex;
+    const vert = this._isVertical();
 
-    if (event.key === 'ArrowDown') {
+    const forward  = vert ? 'ArrowDown' : 'ArrowRight';
+    const backward = vert ? 'ArrowUp'   : 'ArrowLeft';
+
+    if (event.key === forward) {
       const next = current < 0 ? 0 : Math.min(count - 1, current + 1);
-      if (next !== current) {
-        this.currentIndex = next;
-        event.accepted = true;
-      }
-    } else if (event.key === 'ArrowUp') {
+      if (next !== current) { this.currentIndex = next; event.accepted = true; }
+    } else if (event.key === backward) {
       const next = current < 0 ? 0 : Math.max(0, current - 1);
-      if (next !== current) {
-        this.currentIndex = next;
-        event.accepted = true;
-      }
+      if (next !== current) { this.currentIndex = next; event.accepted = true; }
     } else if (event.key === 'PageDown') {
-      const viewRows = Math.max(1, Math.floor((this.height || 0) / this._rowHeight()));
-      const next = Math.min(count - 1, (current < 0 ? 0 : current) + viewRows);
-      if (next !== current) {
-        this.currentIndex = next;
-        event.accepted = true;
-      }
+      const viewSize = vert ? (this.height || 0) : (this.width || 0);
+      const avgSize = this._getDelegateSize(Math.max(0, current));
+      const viewItems = Math.max(1, Math.floor(viewSize / (avgSize + (this.spacing || 0))));
+      const next = Math.min(count - 1, (current < 0 ? 0 : current) + viewItems);
+      if (next !== current) { this.currentIndex = next; event.accepted = true; }
     } else if (event.key === 'PageUp') {
-      const viewRows = Math.max(1, Math.floor((this.height || 0) / this._rowHeight()));
-      const next = Math.max(0, current - viewRows);
-      if (next !== current) {
-        this.currentIndex = next;
-        event.accepted = true;
-      }
+      const viewSize = vert ? (this.height || 0) : (this.width || 0);
+      const avgSize = this._getDelegateSize(Math.max(0, current));
+      const viewItems = Math.max(1, Math.floor(viewSize / (avgSize + (this.spacing || 0))));
+      const next = Math.max(0, current - viewItems);
+      if (next !== current) { this.currentIndex = next; event.accepted = true; }
     }
   }
 
@@ -4745,12 +5028,22 @@ class ListView extends Flickable {
   positionViewAtIndex(index, mode = 0) {
     const count = _modelCount(this.model);
     if (index < 0 || index >= count) return;
-    const rowH = this._rowHeight();
-    this.contentY = this._clampY(this._headerHeight() + index * rowH);
+    const headerS = this._headerSize();
+    const pos = headerS + this._offsetAtIndex(index);
+    if (this._isVertical()) {
+      this.contentY = this._clampY(pos);
+    } else {
+      this.contentX = this._clampX(pos);
+    }
   }
 
   destroy() {
     this._disconnectModel();
+    // Disconnect all size listeners
+    for (let i = 0; i < this._sizeDisconnectors.length; i++) {
+      this._disconnectSizeListener(i);
+    }
+    this._sizeDisconnectors = [];
     // Drain reuse pool
     for (const item of this._reusePool) {
       item.destroy();
