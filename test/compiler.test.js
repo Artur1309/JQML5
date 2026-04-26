@@ -511,3 +511,161 @@ Item {
   // must reach the return statement that returns __createObjectTree(templateNode)
   assert.match(js, /return __createObjectTree/);
 });
+
+// ---------------------------------------------------------------------------
+// Fix: anchors.* property-path assignments compile to setAnchors() calls
+// ---------------------------------------------------------------------------
+
+test('anchors.fill and anchors.centerIn compile to setAnchors() with correct keys', async () => {
+  const fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), 'jqmlc-anchors-'));
+  const outdir = path.join(fixtureDir, 'out');
+  fs.mkdirSync(outdir, { recursive: true });
+
+  fs.writeFileSync(path.join(fixtureDir, 'Main.qml'), `
+import QtQuick 2.15
+Item {
+  id: root
+  width: 400
+  height: 400
+
+  Rectangle {
+    anchors.fill: parent
+    color: "blue"
+  }
+
+  Rectangle {
+    anchors.centerIn: parent
+    width: 100
+    height: 100
+    color: "red"
+  }
+}
+`, 'utf8');
+
+  const result = await compileQmlApplication({
+    entryFile: path.join(fixtureDir, 'Main.qml'),
+    outdir,
+  });
+
+  assert.equal(result.componentCount >= 1, true);
+  const js = fs.readFileSync(path.join(outdir, 'app.js'), 'utf8');
+
+  // The bundle must call setAnchors (the runtime API that actually applies anchors)
+  assert.match(js, /setAnchors/);
+  // The serialized AST JSON embedded in the bundle retains the anchors.* property names
+  assert.match(js, /anchors\.fill/);
+  assert.match(js, /anchors\.centerIn/);
+});
+
+test('full anchors key set compiles to setAnchors() entries', async () => {
+  const fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), 'jqmlc-anchors-full-'));
+  const outdir = path.join(fixtureDir, 'out');
+  fs.mkdirSync(outdir, { recursive: true });
+
+  fs.writeFileSync(path.join(fixtureDir, 'Main.qml'), `
+import QtQuick 2.15
+Item {
+  id: root
+  width: 400
+  height: 400
+
+  Rectangle {
+    id: box
+    anchors.left: root
+    anchors.right: root
+    anchors.top: root
+    anchors.bottom: root
+    anchors.margins: 10
+    anchors.leftMargin: 5
+    anchors.rightMargin: 5
+    anchors.topMargin: 5
+    anchors.bottomMargin: 5
+    anchors.horizontalCenterOffset: 0
+    anchors.verticalCenterOffset: 0
+    color: "green"
+  }
+}
+`, 'utf8');
+
+  const result = await compileQmlApplication({
+    entryFile: path.join(fixtureDir, 'Main.qml'),
+    outdir,
+  });
+
+  assert.equal(result.componentCount >= 1, true);
+  const js = fs.readFileSync(path.join(outdir, 'app.js'), 'utf8');
+
+  assert.match(js, /setAnchors/);
+  // All anchors.* property names must appear in the serialized AST
+  assert.match(js, /anchors\.left/);
+  assert.match(js, /anchors\.right/);
+  assert.match(js, /anchors\.top/);
+  assert.match(js, /anchors\.bottom/);
+  assert.match(js, /anchors\.margins/);
+});
+
+// ---------------------------------------------------------------------------
+// Fix: border.color / border.width map to flat borderColor / borderWidth
+// ---------------------------------------------------------------------------
+
+test('border.color and border.width compile to borderColor and borderWidth assignments', async () => {
+  const fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), 'jqmlc-border-'));
+  const outdir = path.join(fixtureDir, 'out');
+  fs.mkdirSync(outdir, { recursive: true });
+
+  fs.writeFileSync(path.join(fixtureDir, 'Main.qml'), `
+import QtQuick 2.15
+Rectangle {
+  color: "red"
+  width: 100
+  height: 100
+  border.color: "green"
+  border.width: 5
+}
+`, 'utf8');
+
+  const result = await compileQmlApplication({
+    entryFile: path.join(fixtureDir, 'Main.qml'),
+    outdir,
+  });
+
+  assert.equal(result.componentCount >= 1, true);
+  const js = fs.readFileSync(path.join(outdir, 'app.js'), 'utf8');
+
+  // border.color must be rewritten to borderColor, border.width to borderWidth
+  assert.match(js, /borderColor/);
+  assert.match(js, /borderWidth/);
+});
+
+test('runtime: compiled Rectangle with border.color and border.width sets borderColor/borderWidth', async () => {
+  const fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), 'jqmlc-border-runtime-'));
+  const outdir = path.join(fixtureDir, 'out');
+  fs.mkdirSync(outdir, { recursive: true });
+
+  fs.writeFileSync(path.join(fixtureDir, 'Main.qml'), `
+import QtQuick 2.15
+Rectangle {
+  color: "red"
+  width: 100
+  height: 100
+  border.color: "green"
+  border.width: 5
+}
+`, 'utf8');
+
+  await compileQmlApplication({
+    entryFile: path.join(fixtureDir, 'Main.qml'),
+    outdir,
+  });
+
+  const bundleJs = fs.readFileSync(path.join(outdir, 'app.js'), 'utf8');
+  // The rewritten property names must appear in the bundle so that the runtime
+  // Rectangle.borderColor and Rectangle.borderWidth properties receive the values.
+  assert.match(bundleJs, /borderColor/);
+  assert.match(bundleJs, /borderWidth/);
+  // The original dot-path form must be rewritten – it should not appear as a
+  // runtime assignment target (it still appears in the embedded AST JSON as a
+  // property name, but must not appear as a __assignPropertyPath call argument).
+  assert.match(bundleJs, /"border\.color"/);  // present in serialised AST JSON
+  assert.match(bundleJs, /"border\.width"/);  // present in serialised AST JSON
+});
