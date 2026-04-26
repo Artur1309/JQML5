@@ -128,7 +128,9 @@ function generateComponentFactory(component, moduleIdMap) {
   output += `      for (const prop of node.properties) {\n`;
   output += `        if (prop.name.startsWith('anchors.')) {\n`;
   output += `          const _av = __compileValue(object, prop.value, scopeState, prop.name, false);\n`;
-  output += `          anchorBuffer[prop.name.slice('anchors.'.length)] = (_av instanceof __runtime.Binding) ? _av.evaluate() : _av;\n`;
+  output += `          let _avResolved = _av;\n`;
+  output += `          if (_av instanceof __runtime.Binding) { try { _avResolved = _av.evaluate(); } catch (_) { _avResolved = null; } }\n`;
+  output += `          anchorBuffer[prop.name.slice('anchors.'.length)] = _avResolved;\n`;
   output += `          continue;\n`;
   output += `        }\n`;
   output += `        // Stage C: Keys.onPressed / Keys.onReleased attached property handlers\n`;
