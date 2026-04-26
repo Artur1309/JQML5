@@ -2019,3 +2019,38 @@ test('Text.draw uses measurement cache for elide', () => {
   // Net new calls must be fewer than on the first draw (which measured many substrings).
   assert.ok(newCalls < firstCallCount, `Second draw (${newCalls} new calls) should use cache more than first (${firstCallCount} calls)`);
 });
+
+// ---------------------------------------------------------------------------
+// Fix: explicit `delegate: Component { ... }` – runtime smoke test
+// ---------------------------------------------------------------------------
+
+test('ListView with numeric model and explicit Component delegate does not throw and creates items', () => {
+  const { ListView, Component, Rectangle, Context, ComponentScope } = require('../src/runtime');
+
+  const listView = new ListView();
+  listView.width = 200;
+  listView.height = 200;
+  listView._delegateHeight = 50;
+  listView.cacheBuffer = 0;
+
+  listView.setContext(new Context(null, {}));
+
+  // Simulate what `delegate: Component { Rectangle { ... } }` compiles to:
+  // __createObjectTree for a Component node returns a Component whose factory
+  // returns the inner Rectangle (a QObject).  Previously the code would wrap
+  // this Component in *another* Component, making the outer factory return a
+  // Component instance rather than a QObject, which triggered:
+  //   "Component factory must return a QObject instance."
+  const innerDelegate = new Component(({ parent: p }) => {
+    const rect = new Rectangle({ parentItem: p });
+    rect.width = 50;
+    rect.height = 50;
+    return rect;
+  });
+
+  // Assign a numeric model (100 rows) and the delegate – must not throw.
+  listView.model = 3;
+  listView.delegate = innerDelegate;
+
+  assert.ok(listView.createdCount > 0, `Expected at least one delegate to be created, got ${listView.createdCount}`);
+});
