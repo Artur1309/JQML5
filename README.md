@@ -410,6 +410,34 @@ Output:
   - `Slider { from: 0; to: 1; value: 0.5; stepSize: 0.1; onValueChanged: … }`
   - `CheckBox { text: "Option"; checked: false; onClicked: … }`
   - `Label { text: "…"; color: "…" }`
+- **PR2 additions** (layout positioners)
+  - `Row { spacing: 5; … }` – horizontal positioner
+  - `Column { spacing: 5; … }` – vertical positioner
+  - `Flow { spacing: 5; … }` – wrapping positioner (LeftToRight / TopToBottom)
+  - All positioners support `padding`, `topPadding`, `bottomPadding`, `leftPadding`, `rightPadding`, `layoutDirection`
+- **QML compatibility layer (attached properties, grouped blocks, enums)**
+  - **Attached properties** – registry-driven dispatch via `__ATTACHED_HANDLERS` in `tools/jqmlc/lib/codegen.js`
+    - `Component.onCompleted: { … }` – handler runs after the component tree is fully created (correct `this` binding, QML id scope access)
+    - `Component.onDestruction: { … }` – handler fires when the object is destroyed
+    - `Keys.onPressed: { … }` / `Keys.onReleased: { … }` / `Keys.onReturnPressed: { … }` / `Keys.onEscapePressed: { … }` – migrated to registry, same behaviour as before
+    - `Layout.fillWidth: true` / `Layout.fillHeight: true` / `Layout.preferredWidth: N` / … – stored in `object.__layoutAttached` for use by future RowLayout/ColumnLayout
+    - `import QtQuick.Layouts 1.15` is recognised without error
+    - _Extend:_ add a new entry to `__ATTACHED_HANDLERS` in `codegen.js` to support further attached types (e.g. `ScrollBar.policy`, `Accessible.role`)
+  - **Grouped property blocks** – `border { … }` and `font { … }` object-block syntax
+    - `border { color: "navy"; width: 2 }` – expanded to `borderColor` / `borderWidth` on parent `Rectangle`
+    - `font { family: "Arial"; pixelSize: 18; bold: true }` – merged into the `font` object property on `Text`
+    - `border.color: "…"` / `border.width: N` dot-path form continues to work unchanged
+    - `font.pixelSize: N` / `font.family: "…"` dot-path form works via `__assignPropertyPath`
+    - `border` and `font` are registered as `grouped-block` pseudo-types in `tools/jqmlc/lib/registry.js`
+    - _Extend:_ add new entries to `__GROUPED_BLOCK_METADATA` in `codegen.js` and register the type name in `registry.js`
+  - **Enum constants** – `TypeName.Value` identifiers resolved at compile time via `__ENUM_TABLE`
+    - `Text.ElideNone` / `Text.ElideLeft` / `Text.ElideRight` / `Text.ElideMiddle` → `'none'` / `'left'` / `'right'` / `'middle'`
+    - `Text.NoWrap` / `Text.WordWrap` / `Text.WrapAnywhere` → `'nowrap'` / `'wordwrap'` / `'wrapanywhere'`
+    - `Text.AlignLeft` / `Text.AlignRight` / `Text.AlignHCenter` / `Text.AlignJustify` → `'left'` / `'right'` / `'center'` / `'justify'`
+    - `Text.AlignTop` / `Text.AlignVCenter` / `Text.AlignBottom` → `'top'` / `'vcenter'` / `'bottom'`
+    - `Image.Stretch` / `Image.PreserveAspectFit` / `Image.PreserveAspectCrop` / `Image.Pad` / `Image.Tile`
+    - `Qt.AlignLeft` / `Qt.AlignRight` / `Qt.AlignHCenter` / `Qt.AlignTop` / `Qt.AlignVCenter` / `Qt.AlignBottom`
+    - _Extend:_ add new entries to `__ENUM_TABLE` in `codegen.js`
 - **Property-path rewrites** (anchors and border)
   - `anchors.fill: parent` / `anchors.centerIn: parent` and all edge+margin anchors compile to `setAnchors({…})` calls so the runtime applies geometry correctly.
   - Supported `anchors.*` keys: `fill`, `centerIn`, `left`, `right`, `top`, `bottom`, `margins`, `leftMargin`, `rightMargin`, `topMargin`, `bottomMargin`, `horizontalCenterOffset`, `verticalCenterOffset`.
@@ -424,8 +452,17 @@ Compiler internals are split so you can extend without rewriting the pipeline:
 
 - **Type registry**: `tools/jqmlc/lib/registry.js`
   - Register runtime constructors in one place.
+  - Register `grouped-block` pseudo-types (e.g. `border`, `font`) so the resolver skips them.
 - **Module mappers**: `tools/jqmlc/lib/registry.js`
-  - Map QML module imports (`QtQuick`, `QtQml`, `QtQuick.Controls`) to exposed types.
+  - Map QML module imports (`QtQuick`, `QtQml`, `QtQuick.Controls`, `QtQuick.Layouts`) to exposed types.
+- **Attached property handlers**: `__ATTACHED_HANDLERS` in `tools/jqmlc/lib/codegen.js`
+  - Add `'TypeName.propName': function(object, valueNode, scopeState) { … }` to handle new attached properties.
+- **Grouped property block handlers**: `__GROUPED_BLOCK_METADATA` in `tools/jqmlc/lib/codegen.js`
+  - Add `'groupName': { rewrites: { subProp: 'flatProp' }, targetProp: null }` for flat rewrite blocks.
+  - Or `'groupName': { rewrites: null, targetProp: 'objectProp' }` to merge into an existing object property.
+  - Register the group name in `registry.js` with `kind: 'grouped-block'`.
+- **Enum constant table**: `__ENUM_TABLE` in `tools/jqmlc/lib/codegen.js`
+  - Add `'TypeName.Value': resolvedValue` to resolve QML enum identifiers at compile time.
 - **Asset rules**: `tools/jqmlc/lib/assets.js`
   - Default rule copies string literals from `source`, `*Source`, and `*url*` property names.
 
