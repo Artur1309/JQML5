@@ -4293,9 +4293,10 @@ class ListView extends Flickable {
 
     // Orientation: 'vertical' (default) stacks items top-to-bottom;
     // 'horizontal' stacks items left-to-right.
-    this.defineProperty('orientation', options.orientation ?? 'vertical');
+    const _initialOrientation = options.orientation ?? 'vertical';
+    this.defineProperty('orientation', _initialOrientation);
     // Sync flickableDirection with initial orientation.
-    if ((options.orientation ?? 'vertical') === 'horizontal') {
+    if (_initialOrientation === 'horizontal') {
       this.flickableDirection = 'HorizontalFlick';
     }
 
@@ -4417,15 +4418,15 @@ class ListView extends Flickable {
     if (i <= 0) return 0;
     if (i < this._prefixSums.length) return this._prefixSums[i];
     // Extend on-the-fly if prefix sums haven't been fully built yet.
-    const last = this._prefixSums.length > 0
-      ? this._prefixSums[this._prefixSums.length - 1]
-      : 0;
-    const missing = i - (this._prefixSums.length - 1);
+    const psLen = this._prefixSums.length;
+    const last = psLen > 0 ? this._prefixSums[psLen - 1] : 0;
+    const missing = i - (psLen - 1);
     return last + missing * (this._defaultDelegateSize + (this.spacing || 0));
   }
 
   // Binary search: returns the last index i such that _prefixSums[i] <= offset.
-  // This is the index of the item whose start position <= offset.
+  // This is the index of the item whose start position is <= offset.
+  // Uses upper-biased midpoint so the search always converges.
   _indexAtOffset(offset) {
     const count = _modelCount(this.model);
     if (count === 0) return 0;
@@ -4434,7 +4435,7 @@ class ListView extends Flickable {
     let lo = 0;
     let hi = count - 1;
     while (lo < hi) {
-      const mid = (lo + hi + 1) >> 1;
+      const mid = (lo + hi + 1) >>> 1;  // upper-biased midpoint (avoids infinite loop)
       if (ps[mid] <= offset) {
         lo = mid;
       } else {

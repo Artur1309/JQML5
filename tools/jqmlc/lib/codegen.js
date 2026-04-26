@@ -423,6 +423,7 @@ const __ATTACHED_HANDLERS = {
   },
   'ListView.onReused': function(object, valueNode, scopeState) {
     var _v = valueNode;
+    // Ensure the attached bag exists (may have been created by onPooled already).
     if (!object._listViewAttached) object._listViewAttached = { onPooled: null, onReused: null };
     object._listViewAttached.onReused = function() {
       var hs = __createExecutionScope(object, scopeState, object.parentItem || object.parent, null);
