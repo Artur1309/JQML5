@@ -130,6 +130,16 @@ function generateComponentFactory(component, moduleIdMap) {
   output += `          anchorBuffer[prop.name.slice('anchors.'.length)] = __compileValue(object, prop.value, scopeState, prop.name, false);\n`;
   output += `          continue;\n`;
   output += `        }\n`;
+  output += `        // Stage C: Keys.onPressed / Keys.onReleased attached property handlers\n`;
+  output += `        if ((prop.name === 'Keys.onPressed' || prop.name === 'Keys.onReleased') && object instanceof __runtime.Item) {\n`;
+  output += `          const keysHandlerProp = prop.name.slice(5);\n`;
+  output += `          const keysValueNode = prop.value;\n`;
+  output += `          object.keys[keysHandlerProp] = (...args) => {\n`;
+  output += `            const handlerScope = __createExecutionScope(object, scopeState, object.parentItem || object.parent, args[0]);\n`;
+  output += `            return __runJs(keysValueNode, handlerScope, object);\n`;
+  output += `          };\n`;
+  output += `          continue;\n`;
+  output += `        }\n`;
   output += `        // Stage A: defer states/transitions until after children so IDs are available\n`;
   output += `        if (prop.name === 'states' && prop.value && prop.value.kind === 'ArrayValue') {\n`;
   output += `          deferredStateProps.push(prop); continue;\n`;

@@ -986,3 +986,420 @@ test('ListView rebuilds when model changes', () => {
   // After appending, rebuild should have been triggered
   assert.ok(listView.contentHeight >= 40 * 4, 'contentHeight should cover 4 rows');
 });
+
+// ---------------------------------------------------------------------------
+// Stage C: Focus system
+// ---------------------------------------------------------------------------
+
+test('Item has focus, activeFocus, focusable, activeFocusOnTab, focusScope properties', () => {
+  const { Item } = require('../src/runtime');
+
+  const item = new Item();
+  assert.equal(item.focus, false);
+  assert.equal(item.activeFocus, false);
+  assert.equal(item.focusable, false);
+  assert.equal(item.activeFocusOnTab, false);
+  assert.equal(item.focusScope, false);
+});
+
+test('Scene.forceActiveFocus sets activeFocus on item', () => {
+  const { Item, Scene } = require('../src/runtime');
+
+  const root = new Item();
+  root.width = 200;
+  root.height = 200;
+
+  const child = new Item({ parentItem: root });
+  child.width = 100;
+  child.height = 100;
+  child.focusable = true;
+
+  const scene = new Scene({ rootItem: root });
+
+  assert.equal(scene.activeFocusItem, null);
+  scene.forceActiveFocus(child);
+
+  assert.equal(scene.activeFocusItem, child);
+  assert.equal(child.activeFocus, true);
+  assert.equal(child.focus, true);
+});
+
+test('Scene.forceActiveFocus clears previous item activeFocus', () => {
+  const { Item, Scene } = require('../src/runtime');
+
+  const root = new Item();
+  root.width = 200;
+  root.height = 200;
+
+  const a = new Item({ parentItem: root });
+  a.width = 50; a.height = 50; a.focusable = true;
+
+  const b = new Item({ parentItem: root });
+  b.x = 60; b.width = 50; b.height = 50; b.focusable = true;
+
+  const scene = new Scene({ rootItem: root });
+  scene.forceActiveFocus(a);
+  assert.equal(a.activeFocus, true);
+
+  scene.forceActiveFocus(b);
+  assert.equal(a.activeFocus, false);
+  assert.equal(b.activeFocus, true);
+  assert.equal(scene.activeFocusItem, b);
+});
+
+test('Scene.clearFocus removes activeFocus', () => {
+  const { Item, Scene } = require('../src/runtime');
+
+  const root = new Item();
+  root.width = 100;
+  root.height = 100;
+
+  const child = new Item({ parentItem: root });
+  child.width = 50; child.height = 50; child.focusable = true;
+
+  const scene = new Scene({ rootItem: root });
+  scene.forceActiveFocus(child);
+  assert.equal(child.activeFocus, true);
+
+  scene.clearFocus();
+  assert.equal(child.activeFocus, false);
+  assert.equal(scene.activeFocusItem, null);
+});
+
+test('Scene.focusNext cycles through focusable items in depth-first order', () => {
+  const { Item, Scene } = require('../src/runtime');
+
+  const root = new Item();
+  root.width = 300; root.height = 100;
+
+  const a = new Item({ parentItem: root });
+  a.width = 50; a.height = 50; a.activeFocusOnTab = true;
+
+  const b = new Item({ parentItem: root });
+  b.x = 60; b.width = 50; b.height = 50; b.activeFocusOnTab = true;
+
+  const c = new Item({ parentItem: root });
+  c.x = 120; c.width = 50; c.height = 50; c.activeFocusOnTab = true;
+
+  const scene = new Scene({ rootItem: root });
+
+  scene.focusNext();
+  assert.equal(scene.activeFocusItem, a);
+
+  scene.focusNext();
+  assert.equal(scene.activeFocusItem, b);
+
+  scene.focusNext();
+  assert.equal(scene.activeFocusItem, c);
+
+  // wraps around
+  scene.focusNext();
+  assert.equal(scene.activeFocusItem, a);
+});
+
+test('Scene.focusPrevious cycles backward', () => {
+  const { Item, Scene } = require('../src/runtime');
+
+  const root = new Item();
+  root.width = 300; root.height = 100;
+
+  const a = new Item({ parentItem: root });
+  a.width = 50; a.height = 50; a.activeFocusOnTab = true;
+
+  const b = new Item({ parentItem: root });
+  b.x = 60; b.width = 50; b.height = 50; b.activeFocusOnTab = true;
+
+  const scene = new Scene({ rootItem: root });
+
+  scene.forceActiveFocus(b);
+  scene.focusPrevious();
+  assert.equal(scene.activeFocusItem, a);
+});
+
+test('_collectFocusableItems skips invisible and disabled items', () => {
+  const { Item, Scene } = require('../src/runtime');
+
+  const root = new Item();
+  root.width = 300; root.height = 100;
+
+  const visible = new Item({ parentItem: root });
+  visible.width = 50; visible.height = 50; visible.activeFocusOnTab = true;
+
+  const hidden = new Item({ parentItem: root });
+  hidden.width = 50; hidden.height = 50; hidden.activeFocusOnTab = true;
+  hidden.visible = false;
+
+  const disabled = new Item({ parentItem: root });
+  disabled.width = 50; disabled.height = 50; disabled.activeFocusOnTab = true;
+  disabled.enabled = false;
+
+  const scene = new Scene({ rootItem: root });
+  const items = scene._collectFocusableItems();
+  assert.equal(items.length, 1);
+  assert.equal(items[0], visible);
+});
+
+// ---------------------------------------------------------------------------
+// Stage C: Keys attached property
+// ---------------------------------------------------------------------------
+
+test('Item.keys lazily creates a Keys instance', () => {
+  const { Item, Keys } = require('../src/runtime');
+
+  const item = new Item();
+  assert.equal(item._keys, null);
+  const keys = item.keys;
+  assert.ok(keys instanceof Keys);
+  assert.equal(item.keys, keys); // same instance on repeated access
+});
+
+test('Scene.dispatchKey calls Keys.onPressed handler on activeFocusItem', () => {
+  const { Item, Scene } = require('../src/runtime');
+
+  const root = new Item();
+  root.width = 200; root.height = 200;
+
+  const child = new Item({ parentItem: root });
+  child.width = 100; child.height = 100; child.focusable = true;
+
+  const scene = new Scene({ rootItem: root });
+  scene.forceActiveFocus(child);
+
+  const events = [];
+  child.keys.onPressed = (event) => { events.push(event.key); };
+
+  const fakeKeyEvent = { key: 'a', code: 'KeyA', ctrlKey: false, altKey: false, shiftKey: false, metaKey: false };
+  scene.dispatchKey('pressed', fakeKeyEvent);
+
+  assert.deepEqual(events, ['a']);
+});
+
+test('Scene.dispatchKey calls Keys.onReleased handler', () => {
+  const { Item, Scene } = require('../src/runtime');
+
+  const root = new Item();
+  root.width = 200; root.height = 200;
+
+  const child = new Item({ parentItem: root });
+  child.width = 100; child.height = 100; child.focusable = true;
+
+  const scene = new Scene({ rootItem: root });
+  scene.forceActiveFocus(child);
+
+  const events = [];
+  child.keys.onReleased = (event) => { events.push(event.key); };
+
+  const fakeKeyEvent = { key: 'b', code: 'KeyB', ctrlKey: false, altKey: false, shiftKey: false, metaKey: false };
+  scene.dispatchKey('released', fakeKeyEvent);
+
+  assert.deepEqual(events, ['b']);
+});
+
+test('Scene.dispatchKey bubbles up to parentItem when not accepted', () => {
+  const { Item, Scene } = require('../src/runtime');
+
+  const root = new Item();
+  root.width = 200; root.height = 200;
+
+  const parent = new Item({ parentItem: root });
+  parent.width = 150; parent.height = 150;
+
+  const child = new Item({ parentItem: parent });
+  child.width = 50; child.height = 50; child.focusable = true;
+
+  const scene = new Scene({ rootItem: root });
+  scene.forceActiveFocus(child);
+
+  const parentEvents = [];
+  const childEvents = [];
+  child.keys.onPressed = (event) => { childEvents.push(event.key); /* not accepted */ };
+  parent.keys.onPressed = (event) => { parentEvents.push(event.key); };
+
+  const fakeEvent = { key: 'x', code: 'KeyX', ctrlKey: false, altKey: false, shiftKey: false, metaKey: false };
+  scene.dispatchKey('pressed', fakeEvent);
+
+  assert.deepEqual(childEvents, ['x']);
+  assert.deepEqual(parentEvents, ['x']);
+});
+
+test('Scene.dispatchKey stops bubbling when event is accepted', () => {
+  const { Item, Scene } = require('../src/runtime');
+
+  const root = new Item();
+  root.width = 200; root.height = 200;
+
+  const parent = new Item({ parentItem: root });
+  parent.width = 150; parent.height = 150;
+
+  const child = new Item({ parentItem: parent });
+  child.width = 50; child.height = 50; child.focusable = true;
+
+  const scene = new Scene({ rootItem: root });
+  scene.forceActiveFocus(child);
+
+  const parentEvents = [];
+  child.keys.onPressed = (event) => { event.accepted = true; };
+  parent.keys.onPressed = (event) => { parentEvents.push(event.key); };
+
+  const fakeEvent = { key: 'y', code: 'KeyY', ctrlKey: false, altKey: false, shiftKey: false, metaKey: false };
+  scene.dispatchKey('pressed', fakeEvent);
+
+  assert.deepEqual(parentEvents, []);
+});
+
+test('Keys.enabled = false prevents handler from being called', () => {
+  const { Item, Scene } = require('../src/runtime');
+
+  const root = new Item();
+  root.width = 200; root.height = 200;
+
+  const child = new Item({ parentItem: root });
+  child.width = 100; child.height = 100; child.focusable = true;
+
+  const scene = new Scene({ rootItem: root });
+  scene.forceActiveFocus(child);
+
+  const events = [];
+  child.keys.onPressed = (event) => { events.push(event.key); };
+  child.keys.enabled = false;
+
+  const fakeEvent = { key: 'z', code: 'KeyZ', ctrlKey: false, altKey: false, shiftKey: false, metaKey: false };
+  scene.dispatchKey('pressed', fakeEvent);
+
+  assert.deepEqual(events, []);
+});
+
+test('Scene.dispatchKey returns null when no activeFocusItem', () => {
+  const { Item, Scene } = require('../src/runtime');
+
+  const root = new Item();
+  root.width = 200; root.height = 200;
+
+  const scene = new Scene({ rootItem: root });
+  const result = scene.dispatchKey('pressed', { key: 'a', code: 'KeyA', ctrlKey: false, altKey: false, shiftKey: false, metaKey: false });
+  assert.equal(result, null);
+});
+
+// ---------------------------------------------------------------------------
+// Stage C: TapHandler
+// ---------------------------------------------------------------------------
+
+test('TapHandler emits tapped when pressed and released inside bounds', () => {
+  const { Item, TapHandler, Scene } = require('../src/runtime');
+
+  const root = new Item();
+  root.width = 200; root.height = 200;
+
+  const handler = new TapHandler({ parentItem: root });
+  handler.width = 100; handler.height = 100;
+
+  let tappedCount = 0;
+  handler.tapped.connect(() => { tappedCount += 1; });
+
+  const scene = new Scene({ rootItem: root });
+  scene.dispatchPointer('down', 50, 50);
+  scene.dispatchPointer('up', 50, 50);
+
+  assert.equal(tappedCount, 1);
+});
+
+test('TapHandler does not emit tapped when released outside bounds', () => {
+  const { Item, TapHandler, Scene } = require('../src/runtime');
+
+  const root = new Item();
+  root.width = 200; root.height = 200;
+
+  const handler = new TapHandler({ parentItem: root });
+  handler.width = 100; handler.height = 100;
+
+  let tappedCount = 0;
+  handler.tapped.connect(() => { tappedCount += 1; });
+
+  const scene = new Scene({ rootItem: root });
+  scene.dispatchPointer('down', 50, 50);
+  scene.dispatchPointer('up', 150, 150); // outside
+
+  assert.equal(tappedCount, 0);
+});
+
+// ---------------------------------------------------------------------------
+// Stage C: DragHandler
+// ---------------------------------------------------------------------------
+
+test('DragHandler tracks active state and translation', () => {
+  const { Item, DragHandler, Scene } = require('../src/runtime');
+
+  const root = new Item();
+  root.width = 300; root.height = 300;
+
+  const draggable = new Item({ parentItem: root });
+  draggable.x = 50; draggable.y = 50;
+  draggable.width = 100; draggable.height = 100;
+
+  const handler = new DragHandler({ parentItem: draggable });
+  handler.width = 100; handler.height = 100;
+
+  const activeChanges = [];
+  handler.activeChanged.connect((next) => { activeChanges.push(next); });
+
+  const scene = new Scene({ rootItem: root });
+
+  // press inside draggable
+  scene.dispatchPointer('down', 100, 100);
+  assert.equal(handler.active, true);
+
+  // move
+  scene.dispatchPointer('move', 120, 130);
+  assert.equal(handler.translation.x, 20);
+  assert.equal(handler.translation.y, 30);
+
+  // release
+  scene.dispatchPointer('up', 120, 130);
+  assert.equal(handler.active, false);
+
+  assert.deepEqual(activeChanges, [true, false]);
+});
+
+test('DragHandler moves parentItem when no explicit dragTarget', () => {
+  const { Item, DragHandler, Scene } = require('../src/runtime');
+
+  const root = new Item();
+  root.width = 300; root.height = 300;
+
+  const box = new Item({ parentItem: root });
+  box.x = 0; box.y = 0;
+  box.width = 100; box.height = 100;
+
+  const handler = new DragHandler({ parentItem: box });
+  handler.width = 100; handler.height = 100;
+
+  const scene = new Scene({ rootItem: root });
+  scene.dispatchPointer('down', 50, 50);
+  scene.dispatchPointer('move', 80, 90);
+
+  assert.equal(box.x, 30);
+  assert.equal(box.y, 40);
+});
+
+test('DragHandler grab continues after pointer leaves original position', () => {
+  const { Item, DragHandler, Scene } = require('../src/runtime');
+
+  const root = new Item();
+  root.width = 400; root.height = 400;
+
+  const box = new Item({ parentItem: root });
+  box.x = 0; box.y = 0;
+  box.width = 100; box.height = 100;
+
+  const handler = new DragHandler({ parentItem: box });
+  handler.width = 100; handler.height = 100;
+
+  const scene = new Scene({ rootItem: root });
+  scene.dispatchPointer('down', 50, 50);
+
+  // Move far outside original bounds — grab should keep handler active
+  scene.dispatchPointer('move', 250, 250);
+  assert.equal(handler.active, true);
+  assert.equal(handler.translation.x, 200);
+  assert.equal(handler.translation.y, 200);
+});
