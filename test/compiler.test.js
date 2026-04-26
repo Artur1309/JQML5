@@ -240,3 +240,105 @@ Item {
   assert.match(js, /Repeater/);
   assert.match(js, /ListModel/);
 });
+
+test('Stage C: parser captures Keys.onPressed as a property assignment', () => {
+  const ast = parseQml(`
+import QtQuick 2.15
+Item {
+  id: root
+  width: 200
+  height: 200
+  activeFocusOnTab: true
+  Keys.onPressed: {
+    console.log(event.key)
+  }
+  Keys.onReleased: {
+    console.log("released")
+  }
+}
+`, 'KeysTest.qml');
+
+  assert.equal(ast.rootObject.typeName, 'Item');
+  const onPressed = ast.rootObject.properties.find((p) => p.name === 'Keys.onPressed');
+  const onReleased = ast.rootObject.properties.find((p) => p.name === 'Keys.onReleased');
+  assert.ok(onPressed, 'Keys.onPressed should be captured as a property');
+  assert.ok(onReleased, 'Keys.onReleased should be captured as a property');
+  assert.equal(onPressed.value.kind, 'JsBlockValue');
+  assert.equal(onReleased.value.kind, 'JsBlockValue');
+});
+
+test('Stage C: compiler handles Keys.onPressed in QML bundle', async () => {
+  const fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), 'jqmlc-keys-'));
+  const outdir = fs.mkdtempSync(path.join(os.tmpdir(), 'jqmlc-keys-dist-'));
+
+  fs.writeFileSync(path.join(fixtureDir, 'Main.qml'), `
+import QtQuick 2.15
+Item {
+  id: root
+  width: 300
+  height: 200
+  activeFocusOnTab: true
+
+  Keys.onPressed: {
+    console.log(event.key)
+  }
+
+  TapHandler {
+    id: tap
+    width: 300
+    height: 200
+    onTapped: {
+      root.forceActiveFocus()
+    }
+  }
+}
+`, 'utf8');
+
+  const result = await compileQmlApplication({
+    entryFile: path.join(fixtureDir, 'Main.qml'),
+    outdir,
+  });
+
+  assert.equal(result.componentCount >= 1, true);
+  const js = fs.readFileSync(path.join(outdir, 'app.js'), 'utf8');
+  assert.match(js, /Keys\.onPressed|keys\[/);
+  assert.match(js, /TapHandler/);
+});
+
+test('Stage C: compiler handles DragHandler in QML bundle', async () => {
+  const fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), 'jqmlc-drag-'));
+  const outdir = fs.mkdtempSync(path.join(os.tmpdir(), 'jqmlc-drag-dist-'));
+
+  fs.writeFileSync(path.join(fixtureDir, 'Main.qml'), `
+import QtQuick 2.15
+Item {
+  id: root
+  width: 400
+  height: 400
+
+  Rectangle {
+    id: box
+    x: 50
+    y: 50
+    width: 100
+    height: 100
+    color: "#4488ff"
+
+    DragHandler {
+      id: drag
+      width: 100
+      height: 100
+    }
+  }
+}
+`, 'utf8');
+
+  const result = await compileQmlApplication({
+    entryFile: path.join(fixtureDir, 'Main.qml'),
+    outdir,
+  });
+
+  assert.equal(result.componentCount >= 1, true);
+  const js = fs.readFileSync(path.join(outdir, 'app.js'), 'utf8');
+  assert.match(js, /DragHandler/);
+});

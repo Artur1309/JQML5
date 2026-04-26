@@ -31,6 +31,107 @@ Runtime-only QML/QtQuick-like primitives for JavaScript.
   - `ListModel` – role-based, mutable model with full mutation API and change signals
   - `Repeater` – non-visual item that instantiates a delegate `Component` for each model row; updates dynamically on model changes
   - `ListView` – vertical scrolling list with basic virtualization (only creates delegates for visible range + cache buffer)
+- **Stage C: Input / Focus / Keys / Pointer handlers**
+  - Focus system: `focus`, `activeFocus`, `focusScope`, `focusable`, `activeFocusOnTab` on `Item`
+  - `Scene.forceActiveFocus(item)`, `Scene.clearFocus()`, `Scene.focusNext()`, `Scene.focusPrevious()`
+  - `Scene.activeFocusItem` – the currently focused item
+  - Keyboard dispatch: `keydown`/`keyup` DOM events on canvas routed to `activeFocusItem` with bubbling
+  - `Keys` attached property: `Keys.onPressed` / `Keys.onReleased` handlers per item
+  - `TapHandler` – pointer handler that emits `tapped` signal
+  - `DragHandler` – pointer handler with pointer grabbing; `active`, `translation`, `dragTarget` properties
+
+## Stage C: Input / Focus / Keys
+
+### Focus system
+
+```js
+// Item properties
+item.focus = true;          // request focus within scope
+item.activeFocus;           // read-only: whether item has active focus
+item.focusable = true;      // explicitly focusable (via forceActiveFocus)
+item.activeFocusOnTab = true; // included in Tab traversal
+item.focusScope = true;     // marks a focus boundary
+
+// Scene focus API
+scene.activeFocusItem;                  // currently focused Item or null
+scene.forceActiveFocus(item);           // give active focus to item
+scene.clearFocus();                     // remove active focus
+scene.focusNext();                      // Tab – move focus to next item
+scene.focusPrevious();                  // Shift+Tab – move focus to previous item
+```
+
+### Keyboard events
+
+Tab/Shift+Tab are handled automatically by the Scene. For all other keys, set handlers on `item.keys`:
+
+```js
+item.keys.onPressed = (event) => {
+  console.log(event.key, event.code);
+  console.log(event.ctrl, event.alt, event.shift, event.meta);
+  if (event.key === 'Escape') event.accepted = true;
+};
+item.keys.onReleased = (event) => { /* ... */ };
+item.keys.enabled = false; // disable handler without removing it
+```
+
+The event object has: `key`, `code`, `text`, `ctrlKey`/`ctrl`, `altKey`/`alt`, `shiftKey`/`shift`, `metaKey`/`meta`, `accepted`.  
+Set `event.accepted = true` to stop bubbling to parent items.
+
+### QML syntax for Keys
+
+```qml
+Item {
+  activeFocusOnTab: true
+
+  Keys.onPressed: {
+    if (event.key === "Escape") {
+      event.accepted = true
+    }
+  }
+
+  Keys.onReleased: {
+    console.log("released:", event.key)
+  }
+}
+```
+
+### TapHandler
+
+```js
+const tap = new TapHandler({ parentItem: container });
+tap.width = 100; tap.height = 100;
+tap.tapped.connect((event) => console.log('tapped!'));
+```
+
+QML:
+```qml
+TapHandler {
+  width: 200; height: 200
+  onTapped: { console.log("tapped") }
+}
+```
+
+### DragHandler
+
+```js
+const drag = new DragHandler({ parentItem: box });
+drag.width = box.width; drag.height = box.height;
+// drag moves box.parentItem by default; set drag.dragTarget to override
+drag.activeChanged.connect((active) => console.log('drag active:', active));
+```
+
+QML:
+```qml
+Rectangle {
+  id: box
+  x: 50; y: 50; width: 120; height: 80
+
+  DragHandler {
+    id: drag
+    width: 120; height: 80
+  }
+}
+```
 
 ## Stage B: Models / Views
 
@@ -151,6 +252,12 @@ Output:
   - `Repeater { model: ...; delegate: ... }` – full support
   - `ListView { model: ...; delegate: ... }` – full support
   - Delegate context exposes `index`, `model`, `modelData`, and all role names
+- **Stage C additions**
+  - `activeFocusOnTab`, `focusable`, `focusScope` properties on Item
+  - `Keys.onPressed: { ... }` / `Keys.onReleased: { ... }` – attached property handlers
+  - `TapHandler { onTapped: { ... } }` – tap gesture handler
+  - `DragHandler { id: drag }` – drag gesture handler with pointer grabbing
+  - Tab/Shift+Tab navigation handled automatically by Scene (canvas must have `tabindex="0"`)
 
 > ⚠️ Security note: the compiler intentionally supports arbitrary JavaScript in bindings/handlers, so compile and run only trusted QML sources.
 
@@ -184,6 +291,14 @@ A Stage B list-view demo is under `examples/listview-demo/`. Build it with:
 ```bash
 node ./tools/jqmlc/index.js ./examples/listview-demo/Main.qml --outdir dist-listview
 ```
+
+A Stage C input/focus/keys demo is under `examples/input-demo/`. Build it with:
+
+```bash
+node ./tools/jqmlc/index.js ./examples/input-demo/Main.qml --outdir dist-input
+```
+
+> The demo canvas needs `tabindex="0"` in the HTML so the canvas can receive keyboard events.
 
 Optional local development server with rebuild:
 

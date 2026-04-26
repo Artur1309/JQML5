@@ -67,6 +67,10 @@ const RUNTIME_TYPES = [
   ['ListModel', { kind: 'list-model', runtimeExport: 'ListModel', category: 'quick-model' }],
   ['Repeater', { kind: 'runtime', runtimeExport: 'Repeater', category: 'quick-model', isItem: true }],
   ['ListView', { kind: 'runtime', runtimeExport: 'ListView', category: 'quick-model', isItem: true }],
+  // Stage C: focus / keys / pointer handlers
+  ['Keys', { kind: 'runtime', runtimeExport: 'Keys', category: 'quick-input' }],
+  ['TapHandler', { kind: 'runtime', runtimeExport: 'TapHandler', category: 'quick-input', isItem: true }],
+  ['DragHandler', { kind: 'runtime', runtimeExport: 'DragHandler', category: 'quick-input', isItem: true }],
 ];
 
 function createDefaultRegistries() {
@@ -83,6 +87,7 @@ function createDefaultRegistries() {
       'Animation', 'NumberAnimation', 'ColorAnimation', 'SequentialAnimation', 'ParallelAnimation',
       'PropertyChanges', 'State', 'Transition', 'Behavior',
       'ListElement', 'ListModel', 'Repeater', 'ListView',
+      'TapHandler', 'DragHandler',
     ],
   });
   modules.registerModule('QtQml', {

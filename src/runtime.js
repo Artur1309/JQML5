@@ -591,6 +591,16 @@ class Item extends QtObject {
     this.defineProperty('opacity', 1);
     this.defineProperty('z', 0);
 
+    // Stage C: focus properties
+    this.defineProperty('focus', false);
+    this.defineProperty('activeFocus', false);
+    this.defineProperty('focusScope', false);
+    this.defineProperty('focusable', false);
+    this.defineProperty('activeFocusOnTab', false);
+
+    // Stage C: Keys attached property (lazily created)
+    this._keys = null;
+
     this.defineProperty('state', '', {
       onChanged: (nextState, previousState) => {
         this._applyState(nextState, previousState);
@@ -1054,6 +1064,20 @@ class Item extends QtObject {
     }
 
     return this.containsPoint(sceneX, sceneY) ? this : null;
+  }
+
+  // Stage C: Keys attached property accessor
+  get keys() {
+    if (!this._keys) {
+      // eslint-disable-next-line no-use-before-define
+      this._keys = new Keys();
+    }
+    return this._keys;
+  }
+
+  // Stage C: check if this item can receive keyboard focus via Tab
+  _isFocusableByTab() {
+    return this.enabled && this.visible && (this.activeFocusOnTab || this.focusable);
   }
 }
 
@@ -1923,6 +1947,21 @@ class Rectangle extends Item {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Stage C: Keys attached property
+// ---------------------------------------------------------------------------
+
+class Keys {
+  constructor() {
+    this.onPressed = null;
+    this.onReleased = null;
+    this.enabled = true;
+    // priority mirrors Qt Quick Keys.priority: 'BeforeItem' | 'AfterChildren'
+    // Currently informational only; reserved for future handler-ordering support.
+    this.priority = 'BeforeItem';
+  }
+}
+
 class MouseArea extends Item {
   constructor(options = {}) {
     super(options);
@@ -1955,6 +1994,105 @@ class MouseArea extends Item {
         this.clicked.emit(event);
       }
       return wasPressed;
+    }
+
+    return false;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Stage C: TapHandler
+// ---------------------------------------------------------------------------
+
+class TapHandler extends Item {
+  constructor(options = {}) {
+    super(options);
+
+    this._pressedInside = false;
+
+    this.defineSignal('tapped');
+  }
+
+  handlePointerEvent(type, event) {
+    if (!this.enabled || !this.visible) {
+      return false;
+    }
+
+    if (type === 'down') {
+      this._pressedInside = true;
+      return true;
+    }
+
+    if (type === 'up') {
+      const wasPressed = this._pressedInside;
+      this._pressedInside = false;
+      if (wasPressed && this.containsPoint(event.sceneX, event.sceneY)) {
+        this.tapped.emit(event);
+        return true;
+      }
+    }
+
+    return false;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Stage C: DragHandler
+// ---------------------------------------------------------------------------
+
+class DragHandler extends Item {
+  constructor(options = {}) {
+    super(options);
+
+    this._pressedSceneX = 0;
+    this._pressedSceneY = 0;
+    this._pressedTargetX = 0;
+    this._pressedTargetY = 0;
+
+    this.defineProperty('active', false);
+    this.defineProperty('translation', { x: 0, y: 0 });
+    this.defineProperty('dragTarget', null);
+
+    // activeChanged signal is automatically created by defineProperty('active')
+  }
+
+  // Returns the item that should be moved: explicit dragTarget or parentItem
+  get _dragItem() {
+    return this.dragTarget || this.parentItem;
+  }
+
+  handlePointerEvent(type, event) {
+    if (!this.enabled || !this.visible) {
+      return false;
+    }
+
+    if (type === 'down') {
+      this._pressedSceneX = event.sceneX;
+      this._pressedSceneY = event.sceneY;
+      const target = this._dragItem;
+      if (target) {
+        this._pressedTargetX = target.x;
+        this._pressedTargetY = target.y;
+      }
+      this._setPropertyValue('active', true);
+      return true;
+    }
+
+    if (type === 'move' && this.active) {
+      const dx = event.sceneX - this._pressedSceneX;
+      const dy = event.sceneY - this._pressedSceneY;
+      this._setPropertyValue('translation', { x: dx, y: dy });
+      const target = this._dragItem;
+      if (target) {
+        target.x = this._pressedTargetX + dx;
+        target.y = this._pressedTargetY + dy;
+      }
+      return true;
+    }
+
+    if (type === 'up' && this.active) {
+      this._setPropertyValue('active', false);
+      return true;
     }
 
     return false;
@@ -2068,6 +2206,9 @@ class Scene {
     this._pressedTarget = null;
     this._boundHandlers = null;
 
+    // Stage C: focus management
+    this.activeFocusItem = null;
+
     if (canvas) {
       this.attachCanvas(canvas);
     }
@@ -2083,6 +2224,11 @@ class Scene {
 
     this.canvas = canvas;
     this.renderer.setCanvas(canvas);
+
+    // Stage C: ensure canvas can receive keyboard events
+    if (canvas.tabIndex === undefined || canvas.tabIndex < 0) {
+      canvas.tabIndex = 0;
+    }
 
     const toScenePoint = (event) => {
       const rect = canvas.getBoundingClientRect();
@@ -2109,12 +2255,21 @@ class Scene {
         const point = toScenePoint(event);
         this.dispatchPointer('click', point.x, point.y, event);
       },
+      // Stage C: keyboard events
+      keydown: (event) => {
+        this.dispatchKey('pressed', event);
+      },
+      keyup: (event) => {
+        this.dispatchKey('released', event);
+      },
     };
 
     canvas.addEventListener('mousedown', this._boundHandlers.mousedown);
     canvas.addEventListener('mouseup', this._boundHandlers.mouseup);
     canvas.addEventListener('mousemove', this._boundHandlers.mousemove);
     canvas.addEventListener('click', this._boundHandlers.click);
+    canvas.addEventListener('keydown', this._boundHandlers.keydown);
+    canvas.addEventListener('keyup', this._boundHandlers.keyup);
   }
 
   detachCanvas() {
@@ -2128,6 +2283,8 @@ class Scene {
     this.canvas.removeEventListener('mouseup', this._boundHandlers.mouseup);
     this.canvas.removeEventListener('mousemove', this._boundHandlers.mousemove);
     this.canvas.removeEventListener('click', this._boundHandlers.click);
+    this.canvas.removeEventListener('keydown', this._boundHandlers.keydown);
+    this.canvas.removeEventListener('keyup', this._boundHandlers.keyup);
 
     this.canvas = null;
     this._boundHandlers = null;
@@ -2183,6 +2340,127 @@ class Scene {
         }
       }
       current = current.parentItem;
+    }
+
+    if (event.accepted) {
+      this.renderer.markDirty();
+    }
+    return event;
+  }
+
+  // Stage C: Focus management
+
+  // Collect all focusable items in depth-first order
+  _collectFocusableItems(item = this.rootItem) {
+    if (!(item instanceof Item) || !item.visible || !item.enabled) {
+      return [];
+    }
+    const result = [];
+    if (item._isFocusableByTab()) {
+      result.push(item);
+    }
+    for (const child of item._sortedChildItemsAscending()) {
+      result.push(...this._collectFocusableItems(child));
+    }
+    return result;
+  }
+
+  forceActiveFocus(item) {
+    if (!(item instanceof Item)) {
+      return;
+    }
+    const previous = this.activeFocusItem;
+    if (previous === item) {
+      return;
+    }
+    if (previous instanceof Item) {
+      previous._setPropertyValue('activeFocus', false);
+      previous._setPropertyValue('focus', false);
+    }
+    this.activeFocusItem = item;
+    item._setPropertyValue('activeFocus', true);
+    item._setPropertyValue('focus', true);
+    this.renderer.markDirty();
+  }
+
+  clearFocus() {
+    const previous = this.activeFocusItem;
+    if (previous instanceof Item) {
+      previous._setPropertyValue('activeFocus', false);
+      previous._setPropertyValue('focus', false);
+    }
+    this.activeFocusItem = null;
+    this.renderer.markDirty();
+  }
+
+  focusNext() {
+    const items = this._collectFocusableItems();
+    if (items.length === 0) return;
+    const current = this.activeFocusItem;
+    const idx = items.indexOf(current);
+    const next = items[(idx + 1) % items.length];
+    this.forceActiveFocus(next);
+  }
+
+  focusPrevious() {
+    const items = this._collectFocusableItems();
+    if (items.length === 0) return;
+    const current = this.activeFocusItem;
+    const idx = items.indexOf(current);
+    const prev = items[(idx - 1 + items.length) % items.length];
+    this.forceActiveFocus(prev);
+  }
+
+  // Stage C: Keyboard event dispatch
+  dispatchKey(type, originalEvent) {
+    const focusItem = this.activeFocusItem;
+    if (!(focusItem instanceof Item)) {
+      return null;
+    }
+
+    const event = {
+      type,
+      key: originalEvent.key,
+      code: originalEvent.code,
+      text: originalEvent.key && originalEvent.key.length === 1 ? originalEvent.key : '',
+      ctrlKey: Boolean(originalEvent.ctrlKey),
+      altKey: Boolean(originalEvent.altKey),
+      shiftKey: Boolean(originalEvent.shiftKey),
+      metaKey: Boolean(originalEvent.metaKey),
+      // aliases for convenience
+      ctrl: Boolean(originalEvent.ctrlKey),
+      alt: Boolean(originalEvent.altKey),
+      shift: Boolean(originalEvent.shiftKey),
+      meta: Boolean(originalEvent.metaKey),
+      originalEvent,
+      accepted: false,
+    };
+
+    const handlerName = type === 'pressed' ? 'onPressed' : 'onReleased';
+
+    // Bubble from activeFocusItem up via parentItem
+    let current = focusItem;
+    while (current instanceof Item) {
+      if (current._keys && current._keys.enabled && typeof current._keys[handlerName] === 'function') {
+        current._keys[handlerName].call(current, event);
+        if (event.accepted) {
+          break;
+        }
+      }
+      current = current.parentItem;
+    }
+
+    // Handle Tab navigation at scene level
+    if (!event.accepted && type === 'pressed' && originalEvent.key === 'Tab') {
+      if (originalEvent.shiftKey) {
+        this.focusPrevious();
+      } else {
+        this.focusNext();
+      }
+      if (originalEvent.preventDefault) {
+        originalEvent.preventDefault();
+      }
+      event.accepted = true;
     }
 
     if (event.accepted) {
@@ -2752,6 +3030,10 @@ const runtimeExports = {
   ListModel,
   Repeater,
   ListView,
+  // Stage C: focus / keys / pointer handlers
+  Keys,
+  TapHandler,
+  DragHandler,
 };
 
 if (typeof module !== 'undefined' && module.exports) {
