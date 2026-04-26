@@ -557,6 +557,119 @@ class QtObject extends QObject {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Stage E: Transform math utilities
+// ---------------------------------------------------------------------------
+
+/**
+ * Resolve a transformOrigin string/object to a { x, y } point in item-local
+ * coordinates.  The names mirror Qt Quick's Item.TransformOrigin enum values.
+ */
+function _resolveTransformOrigin(transformOrigin, width, height) {
+  if (transformOrigin && typeof transformOrigin === 'object') {
+    return transformOrigin;
+  }
+  switch (transformOrigin) {
+    case 'TopLeft':     return { x: 0,          y: 0 };
+    case 'Top':         return { x: width / 2,  y: 0 };
+    case 'TopRight':    return { x: width,       y: 0 };
+    case 'Left':        return { x: 0,           y: height / 2 };
+    case 'Right':       return { x: width,       y: height / 2 };
+    case 'BottomLeft':  return { x: 0,           y: height };
+    case 'Bottom':      return { x: width / 2,   y: height };
+    case 'BottomRight': return { x: width,        y: height };
+    default:            return { x: width / 2,   y: height / 2 }; // 'Center'
+  }
+}
+
+/**
+ * Compute the 2-D affine matrix that maps a point in item-local coordinates
+ * to parent-item coordinates.  Format: { a, b, c, d, e, f } where
+ *   x' = a*x + c*y + e
+ *   y' = b*x + d*y + f
+ */
+function _itemLocalToParentMatrix(item) {
+  const angle = ((item.rotation || 0) * Math.PI) / 180;
+  const s = item.scale !== undefined ? item.scale : 1;
+
+  if (angle === 0 && s === 1) {
+    // Fast path: pure translation
+    return { a: 1, b: 0, c: 0, d: 1, e: item.x, f: item.y };
+  }
+
+  const w = item.width || item.implicitWidth || 0;
+  const h = item.height || item.implicitHeight || 0;
+  const origin = _resolveTransformOrigin(item.transformOrigin, w, h);
+  const ox = origin.x;
+  const oy = origin.y;
+  const cos = Math.cos(angle);
+  const sin = Math.sin(angle);
+
+  const a = cos * s;
+  const b = sin * s;
+  const c = -sin * s;
+  const d = cos * s;
+  const e = item.x + ox + a * (-ox) + c * (-oy);
+  const f = item.y + oy + b * (-ox) + d * (-oy);
+
+  return { a, b, c, d, e, f };
+}
+
+/** Apply a 2-D affine matrix to a point. */
+function _applyMatrix(m, x, y) {
+  return { x: m.a * x + m.c * y + m.e, y: m.b * x + m.d * y + m.f };
+}
+
+/** Invert a 2-D affine matrix.  Returns null if the matrix is singular. */
+function _invertMatrix(m) {
+  const det = m.a * m.d - m.b * m.c;
+  if (Math.abs(det) < 1e-10) return null;
+  return {
+    a:  m.d / det,
+    b: -m.b / det,
+    c: -m.c / det,
+    d:  m.a / det,
+    e:  (m.c * m.f - m.d * m.e) / det,
+    f:  (m.b * m.e - m.a * m.f) / det,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Stage E: Text measurement cache
+// ---------------------------------------------------------------------------
+
+const _textMeasureCache = new Map();
+
+/**
+ * Measure the pixel width of a string in the given CSS font string.
+ * Results are memoised for the lifetime of the process / page.
+ */
+function _measureTextWidth(context, fontString, text) {
+  const key = `${fontString}||${text}`;
+  if (_textMeasureCache.has(key)) return _textMeasureCache.get(key);
+  const saved = context.font;
+  context.font = fontString;
+  const w = context.measureText(text).width;
+  context.font = saved;
+  _textMeasureCache.set(key, w);
+  return w;
+}
+
+// ---------------------------------------------------------------------------
+// Stage E: Image asset cache
+// ---------------------------------------------------------------------------
+
+/**
+ * Cache entry: { img: HTMLImageElement|null, status: 0|1|2|3 }
+ *   0 = Null, 1 = Loading, 2 = Ready, 3 = Error
+ */
+const _imageCache = new Map();
+
+// Capture the browser Image constructor *before* we define our own Image class.
+const _HtmlImageCtor = (typeof globalThis !== 'undefined' && typeof globalThis.Image === 'function')
+  ? globalThis.Image
+  : null;
+
 class Item extends QtObject {
   constructor(options = {}) {
     const {
@@ -590,6 +703,17 @@ class Item extends QtObject {
     this.defineProperty('enabled', true);
     this.defineProperty('opacity', 1);
     this.defineProperty('z', 0);
+
+    // Stage E: rendering properties
+    this.defineProperty('clip', false);
+    this.defineProperty('scale', 1);
+    this.defineProperty('rotation', 0);
+    this.defineProperty('transformOrigin', 'Center');
+
+    // Stage E: layer support (lazy backing object; layer.enabled = true activates caching)
+    this._layer = { enabled: false };
+    this._layerCache = null;
+    this._layerDirty = true;
 
     // Stage C: focus properties
     this.defineProperty('focus', false);
@@ -982,16 +1106,36 @@ class Item extends QtObject {
 
   _mapToScene(x, y) {
     let current = this;
-    let sceneX = x;
-    let sceneY = y;
+    let pt = { x, y };
 
     while (current instanceof Item) {
-      sceneX += current.x;
-      sceneY += current.y;
+      pt = _applyMatrix(_itemLocalToParentMatrix(current), pt.x, pt.y);
       current = current.parentItem;
     }
 
-    return { x: sceneX, y: sceneY };
+    return pt;
+  }
+
+  /**
+   * Map a scene-space point to this item's local coordinate space by
+   * applying the inverse of each ancestor's transform from root down to self.
+   */
+  _mapFromScene(sceneX, sceneY) {
+    const chain = [];
+    let current = this;
+    while (current instanceof Item) {
+      chain.push(current);
+      current = current.parentItem;
+    }
+
+    let pt = { x: sceneX, y: sceneY };
+    for (let i = chain.length - 1; i >= 0; i--) {
+      const inv = _invertMatrix(_itemLocalToParentMatrix(chain[i]));
+      if (inv) {
+        pt = _applyMatrix(inv, pt.x, pt.y);
+      }
+    }
+    return pt;
   }
 
   mapToItem(targetItem, x = 0, y = 0) {
@@ -1000,20 +1144,12 @@ class Item extends QtObject {
       return scenePoint;
     }
 
-    const targetScenePoint = targetItem._mapToScene(0, 0);
-    return {
-      x: scenePoint.x - targetScenePoint.x,
-      y: scenePoint.y - targetScenePoint.y,
-    };
+    return targetItem._mapFromScene(scenePoint.x, scenePoint.y);
   }
 
   mapFromItem(sourceItem, x = 0, y = 0) {
-    const sourceScenePoint = sourceItem instanceof Item ? sourceItem._mapToScene(x, y) : { x, y };
-    const selfScenePoint = this._mapToScene(0, 0);
-    return {
-      x: sourceScenePoint.x - selfScenePoint.x,
-      y: sourceScenePoint.y - selfScenePoint.y,
-    };
+    const scenePoint = sourceItem instanceof Item ? sourceItem._mapToScene(x, y) : { x, y };
+    return this._mapFromScene(scenePoint.x, scenePoint.y);
   }
 
   containsPoint(sceneX, sceneY) {
@@ -1021,8 +1157,8 @@ class Item extends QtObject {
       return false;
     }
 
-    const local = this.mapFromItem(null, sceneX, sceneY);
-    return local.x >= 0 && local.y >= 0 && local.x <= this.width && local.y <= this.height;
+    const local = this._mapFromScene(sceneX, sceneY);
+    return local.x >= 0 && local.y >= 0 && local.x <= (this.width || 0) && local.y <= (this.height || 0);
   }
 
   _sortedChildItemsAscending() {
@@ -1056,6 +1192,13 @@ class Item extends QtObject {
       return null;
     }
 
+    // If this item clips its children, any point outside our bounds cannot
+    // reach a child — skip all child hit-testing early.
+    const insideSelf = this.containsPoint(sceneX, sceneY);
+    if (this.clip && !insideSelf) {
+      return null;
+    }
+
     for (const child of this._sortedChildItemsDescending()) {
       const hit = child.hitTest(sceneX, sceneY);
       if (hit) {
@@ -1063,7 +1206,7 @@ class Item extends QtObject {
       }
     }
 
-    return this.containsPoint(sceneX, sceneY) ? this : null;
+    return insideSelf ? this : null;
   }
 
   // Stage C: Keys attached property accessor
@@ -1073,6 +1216,17 @@ class Item extends QtObject {
       this._keys = new Keys();
     }
     return this._keys;
+  }
+
+  // Stage E: layer accessor – returns the backing layer config object.
+  // Setting layer.enabled = true activates subtree layer caching.
+  get layer() {
+    return this._layer;
+  }
+
+  // Stage E: mark the layer cache as needing a re-render.
+  _invalidateLayer() {
+    this._layerDirty = true;
   }
 
   // Stage C: check if this item can receive keyboard focus via Tab
@@ -2163,7 +2317,7 @@ class CanvasRenderer {
     this._drawItem(this.rootItem, 1);
   }
 
-  _drawItem(item, inheritedOpacity) {
+  _drawItem(item, inheritedOpacity, _skipLayer = false) {
     if (!item.visible) {
       return;
     }
@@ -2174,11 +2328,43 @@ class CanvasRenderer {
       return;
     }
 
+    // Stage E: layer caching – render subtree to an offscreen canvas and blit.
+    if (!_skipLayer && item._layer && item._layer.enabled) {
+      this._drawItemWithLayer(item, inheritedOpacity);
+      return;
+    }
+
     context.save();
     context.translate(item.x, item.y);
 
+    // Stage E: apply rotation and scale transforms around transformOrigin.
+    const rotation = item.rotation || 0;
+    const scale = item.scale !== undefined ? item.scale : 1;
+    if (rotation !== 0 || scale !== 1) {
+      const w = item.width || item.implicitWidth || 0;
+      const h = item.height || item.implicitHeight || 0;
+      const origin = _resolveTransformOrigin(item.transformOrigin, w, h);
+      context.translate(origin.x, origin.y);
+      if (rotation !== 0) {
+        context.rotate((rotation * Math.PI) / 180);
+      }
+      if (scale !== 1) {
+        context.scale(scale, scale);
+      }
+      context.translate(-origin.x, -origin.y);
+    }
+
     const previousAlpha = context.globalAlpha;
     context.globalAlpha = previousAlpha * opacity;
+
+    // Stage E: clip children to item bounds when clip: true.
+    if (item.clip) {
+      const cw = item.width || item.implicitWidth || 0;
+      const ch = item.height || item.implicitHeight || 0;
+      context.beginPath();
+      context.rect(0, 0, cw, ch);
+      context.clip();
+    }
 
     if (typeof item.draw === 'function') {
       item.draw(context);
@@ -2188,6 +2374,70 @@ class CanvasRenderer {
       this._drawItem(child, opacity);
     }
 
+    context.restore();
+  }
+
+  /**
+   * Stage E: Render an item whose layer.enabled is true.
+   * In environments that support OffscreenCanvas the subtree is painted to an
+   * offscreen surface and cached until _layerDirty is set.  In other
+   * environments (e.g. Node tests) the item is drawn normally.
+   */
+  _drawItemWithLayer(item, inheritedOpacity) {
+    const context = this.context;
+    const opacity = inheritedOpacity * item.opacity;
+    if (opacity <= 0) return;
+
+    const w = item.width || item.implicitWidth || 0;
+    const h = item.height || item.implicitHeight || 0;
+
+    // Fallback: no OffscreenCanvas (e.g. Node.js) – draw without layer.
+    if (typeof OffscreenCanvas === 'undefined' || w <= 0 || h <= 0) {
+      this._drawItem(item, inheritedOpacity, true);
+      return;
+    }
+
+    // Re-render offscreen surface when dirty or dimensions changed.
+    if (
+      !item._layerCache
+      || item._layerCache.width !== w
+      || item._layerCache.height !== h
+      || item._layerDirty
+    ) {
+      const offscreen = new OffscreenCanvas(w, h);
+      const offCtx = offscreen.getContext('2d');
+      offCtx.clearRect(0, 0, w, h);
+      const savedCtx = this.context;
+      this.context = offCtx;
+      if (typeof item.draw === 'function') item.draw(offCtx);
+      for (const child of item._sortedChildItemsAscending()) {
+        this._drawItem(child, 1);
+      }
+      this.context = savedCtx;
+      item._layerCache = offscreen;
+      item._layerDirty = false;
+    }
+
+    // Blit the cached surface at the item's position with transforms applied.
+    context.save();
+    context.translate(item.x, item.y);
+    const rotation = item.rotation || 0;
+    const scale = item.scale !== undefined ? item.scale : 1;
+    if (rotation !== 0 || scale !== 1) {
+      const origin = _resolveTransformOrigin(item.transformOrigin, w, h);
+      context.translate(origin.x, origin.y);
+      if (rotation !== 0) context.rotate((rotation * Math.PI) / 180);
+      if (scale !== 1) context.scale(scale, scale);
+      context.translate(-origin.x, -origin.y);
+    }
+    const previousAlpha = context.globalAlpha;
+    context.globalAlpha = previousAlpha * opacity;
+    if (item.clip) {
+      context.beginPath();
+      context.rect(0, 0, w, h);
+      context.clip();
+    }
+    context.drawImage(item._layerCache, 0, 0);
     context.restore();
   }
 }
@@ -2494,21 +2744,152 @@ class Text extends Item {
     this.defineProperty('elide', options.elide ?? 'ElideNone');
   }
 
+  /** Build a CSS font string from this item's font property. */
+  _fontString() {
+    const font = this.font || {};
+    const size = font.pixelSize || 14;
+    const family = font.family || 'sans-serif';
+    const bold = font.bold ? 'bold ' : '';
+    return `${bold}${size}px ${family}`;
+  }
+
   draw(context) {
     if (!context) return;
     const text = String(this.text ?? '');
     if (!text) return;
 
-    const font = this.font || {};
-    const size = font.pixelSize || 14;
-    const family = font.family || 'sans-serif';
-    const bold = font.bold ? 'bold ' : '';
-    context.font = `${bold}${size}px ${family}`;
+    const fontString = this._fontString();
+    context.font = fontString;
     context.fillStyle = this.color || '#000000';
     context.textBaseline = 'top';
+
+    // Stage E: use cached measurement to determine text width when needed.
+    const w = this.width || 0;
+    if (w > 0 && this.elide !== 'ElideNone') {
+      // Simple elide: truncate with ellipsis if text is wider than item.
+      const measured = _measureTextWidth(context, fontString, text);
+      if (measured > w) {
+        let truncated = text;
+        while (truncated.length > 0 && _measureTextWidth(context, fontString, truncated + '…') > w) {
+          truncated = truncated.slice(0, -1);
+        }
+        context.fillText(truncated + '…', 0, 0);
+        return;
+      }
+    }
+
     context.fillText(text, 0, 0);
   }
 }
+
+// ---------------------------------------------------------------------------
+// Stage E: Image – async image loading with cross-instance caching
+// ---------------------------------------------------------------------------
+
+class Image extends Item {
+  constructor(options = {}) {
+    super(options);
+
+    /** Fill mode: 'Stretch' | 'PreserveAspectFit' | 'PreserveAspectCrop' | 'Pad' */
+    this.defineProperty('source', options.source ?? '');
+    this.defineProperty('fillMode', options.fillMode ?? 'Stretch');
+    /**
+     * Loading status:
+     *   Image.Null    = 0
+     *   Image.Loading = 1
+     *   Image.Ready   = 2
+     *   Image.Error   = 3
+     */
+    this.defineProperty('status', Image.Null);
+
+    this._htmlImage = null;
+
+    this.connect('sourceChanged', () => this._loadImage());
+
+    if (this.source) {
+      this._loadImage();
+    }
+  }
+
+  _loadImage() {
+    const src = this.source;
+    if (!src) {
+      this._htmlImage = null;
+      this._setPropertyValue('status', Image.Null);
+      return;
+    }
+
+    if (_imageCache.has(src)) {
+      const cached = _imageCache.get(src);
+      this._htmlImage = cached.img;
+      this._setPropertyValue('status', cached.status);
+      return;
+    }
+
+    this._setPropertyValue('status', Image.Loading);
+    this._htmlImage = null;
+
+    // Async loading only available in browser environments.
+    if (!_HtmlImageCtor) {
+      return;
+    }
+
+    const img = new _HtmlImageCtor();
+    img.onload = () => {
+      _imageCache.set(src, { img, status: Image.Ready });
+      this._htmlImage = img;
+      this._setPropertyValue('status', Image.Ready);
+      if (this._layer) this._invalidateLayer();
+    };
+    img.onerror = () => {
+      _imageCache.set(src, { img: null, status: Image.Error });
+      this._htmlImage = null;
+      this._setPropertyValue('status', Image.Error);
+    };
+    img.src = src;
+  }
+
+  draw(context) {
+    if (!context || !this._htmlImage) return;
+
+    const iw = this._htmlImage.naturalWidth || this._htmlImage.width || 0;
+    const ih = this._htmlImage.naturalHeight || this._htmlImage.height || 0;
+
+    const dw = this.width || this.implicitWidth || iw;
+    const dh = this.height || this.implicitHeight || ih;
+    if (dw <= 0 || dh <= 0) return;
+
+    if (this.fillMode === 'PreserveAspectFit' && iw > 0 && ih > 0) {
+      const s = Math.min(dw / iw, dh / ih);
+      const fw = iw * s;
+      const fh = ih * s;
+      context.drawImage(this._htmlImage, (dw - fw) / 2, (dh - fh) / 2, fw, fh);
+    } else if (this.fillMode === 'PreserveAspectCrop' && iw > 0 && ih > 0) {
+      const s = Math.max(dw / iw, dh / ih);
+      const fw = iw * s;
+      const fh = ih * s;
+      const sx = (fw - dw) / 2;
+      const sy = (fh - dh) / 2;
+      // Clip to item bounds before drawing
+      context.save();
+      context.rect(0, 0, dw, dh);
+      context.clip();
+      context.drawImage(this._htmlImage, -sx, -sy, fw, fh);
+      context.restore();
+    } else if (this.fillMode === 'Pad' && iw > 0 && ih > 0) {
+      context.drawImage(this._htmlImage, 0, 0, iw, ih);
+    } else {
+      // Stretch (default)
+      context.drawImage(this._htmlImage, 0, 0, dw, dh);
+    }
+  }
+}
+
+// Image status constants (mirrors Qt Quick)
+Image.Null    = 0;
+Image.Loading = 1;
+Image.Ready   = 2;
+Image.Error   = 3;
 
 // ---------------------------------------------------------------------------
 // Stage B: ListElement – data holder for ListModel rows
@@ -3626,6 +4007,8 @@ const runtimeExports = {
   TextField,
   Slider,
   CheckBox,
+  // Stage E: rendering improvements
+  Image,
 };
 
 if (typeof module !== 'undefined' && module.exports) {

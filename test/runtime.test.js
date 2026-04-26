@@ -13,6 +13,8 @@ const {
   MouseArea,
   CanvasRenderer,
   Scene,
+  Text,
+  Image,
 } = require('../src/runtime');
 
 test('QObject properties emit change signal only on value change', () => {
@@ -1728,4 +1730,292 @@ test('Label is an Item with text/color/font properties', () => {
   assert.equal(label.text, 'Hello');
   assert.equal(label.color, '#ff0000');
   assert.ok(typeof label.font === 'object');
+});
+
+// ---------------------------------------------------------------------------
+// Stage E: Rendering improvements – transforms, clip, Image, text cache
+// ---------------------------------------------------------------------------
+
+test('Item has clip, scale, rotation, transformOrigin, layer properties', () => {
+  const item = new Item();
+  assert.equal(item.clip, false);
+  assert.equal(item.scale, 1);
+  assert.equal(item.rotation, 0);
+  assert.equal(item.transformOrigin, 'Center');
+  assert.ok(typeof item.layer === 'object');
+  assert.equal(item.layer.enabled, false);
+
+  item.clip = true;
+  item.scale = 2;
+  item.rotation = 45;
+  item.transformOrigin = 'TopLeft';
+  item.layer.enabled = true;
+
+  assert.equal(item.clip, true);
+  assert.equal(item.scale, 2);
+  assert.equal(item.rotation, 45);
+  assert.equal(item.transformOrigin, 'TopLeft');
+  assert.equal(item.layer.enabled, true);
+});
+
+test('_mapToScene accounts for scale transform', () => {
+  const parent = new Item();
+  parent.x = 100;
+  parent.y = 100;
+  parent.width = 200;
+  parent.height = 200;
+  parent.scale = 2; // scale=2 around center (100,100)
+
+  const child = new Item({ parentItem: parent });
+  child.x = 10;
+  child.y = 10;
+
+  // Parent matrix (px=100, py=100, ox=100, oy=100, s=2, rot=0):
+  //   e = 100 + 100 + 2*(-100) + 0 = 0
+  //   f = 100 + 100 + 0 + 2*(-100) = 0
+  //   → T_parent(lx, ly) = (2*lx, 2*ly)
+  //
+  // child._mapToScene(0,0):
+  //   child matrix is pure translation {e:10, f:10}
+  //   → parent local (10, 10)
+  //   apply parent matrix → scene (20, 20)
+  const pt = child._mapToScene(0, 0);
+  assert.ok(Math.abs(pt.x - 20) < 0.001, `Expected x≈20, got ${pt.x}`);
+  assert.ok(Math.abs(pt.y - 20) < 0.001, `Expected y≈20, got ${pt.y}`);
+});
+
+test('mapToItem / mapFromItem with no transforms (regression)', () => {
+  const root = new Item();
+  root.width = 200;
+  root.height = 200;
+
+  const child = new Item({ parentItem: root });
+  child.x = 20;
+  child.y = 10;
+  child.width = 50;
+  child.height = 40;
+
+  const grand = new Item({ parentItem: child });
+  grand.x = 5;
+  grand.y = 5;
+  grand.width = 10;
+  grand.height = 10;
+
+  const pt = grand.mapToItem(root, 0, 0);
+  assert.ok(Math.abs(pt.x - 25) < 0.001, `Expected x=25, got ${pt.x}`);
+  assert.ok(Math.abs(pt.y - 15) < 0.001, `Expected y=15, got ${pt.y}`);
+
+  const pt2 = root.mapFromItem(grand, 0, 0);
+  assert.ok(Math.abs(pt2.x - 25) < 0.001);
+  assert.ok(Math.abs(pt2.y - 15) < 0.001);
+});
+
+test('mapToItem respects rotation transform', () => {
+  const root = new Item();
+  root.width = 200;
+  root.height = 200;
+
+  // A child rotated 90° around its top-left corner at (50, 50)
+  const child = new Item({ parentItem: root });
+  child.x = 50;
+  child.y = 50;
+  child.width = 100;
+  child.height = 100;
+  child.rotation = 90;
+  child.transformOrigin = 'TopLeft'; // origin = (0,0)
+
+  // child local (100, 0) → 90° rotation around (0,0) →  local rotated = (0, 100)
+  // in parent space: (50 + 0, 50 + 100) = (50, 150)
+  const pt = child.mapToItem(root, 100, 0);
+  assert.ok(Math.abs(pt.x - 50) < 0.5, `Expected x≈50, got ${pt.x}`);
+  assert.ok(Math.abs(pt.y - 150) < 0.5, `Expected y≈150, got ${pt.y}`);
+});
+
+test('containsPoint with 90° rotation', () => {
+  const root = new Item();
+  root.width = 200;
+  root.height = 200;
+
+  const child = new Item({ parentItem: root });
+  child.x = 50;
+  child.y = 50;
+  child.width = 100;
+  child.height = 10;
+  child.rotation = 90;
+  child.transformOrigin = 'TopLeft';
+
+  // After 90° rotation around (0,0): the child occupies
+  // scene rect x=[50-10,50], y=[50,150] roughly
+  // Scene point (45, 80) should be inside the rotated child
+  assert.equal(child.containsPoint(45, 80), true, 'Scene point inside rotated child');
+  // Scene point (60, 80) should be outside (width is only 10 → 0–10 in local x becomes 0–(-10) in scene x after 90°)
+  assert.equal(child.containsPoint(60, 80), false, 'Scene point outside rotated child');
+});
+
+test('hitTest respects clip flag', () => {
+  const root = new Item();
+  root.width = 100;
+  root.height = 100;
+  root.clip = true; // clip children to 100×100
+
+  const child = new Rectangle({ parentItem: root });
+  child.x = 0;
+  child.y = 0;
+  child.width = 200; // extends beyond root bounds
+  child.height = 50;
+
+  // Point inside both root and child
+  assert.equal(root.hitTest(50, 25), child);
+
+  // Point inside child but outside root (clip should exclude)
+  assert.equal(root.hitTest(120, 25), null);
+});
+
+test('hitTest with no clip allows children outside parent bounds', () => {
+  const root = new Item();
+  root.width = 100;
+  root.height = 100;
+  root.clip = false;
+
+  const child = new Rectangle({ parentItem: root });
+  child.x = 0;
+  child.y = 0;
+  child.width = 200;
+  child.height = 50;
+
+  // Without clip, child extends and can receive hits outside root bounds
+  assert.equal(root.hitTest(150, 25), child);
+});
+
+test('CanvasRenderer applies translation, rotation, scale and clip', () => {
+  const ops = [];
+  const fakeCtx = {
+    globalAlpha: 1,
+    save: () => ops.push('save'),
+    restore: () => ops.push('restore'),
+    translate: (x, y) => ops.push(`translate(${x},${y})`),
+    rotate: (r) => ops.push(`rotate(${r.toFixed(4)})`),
+    scale: (sx, sy) => ops.push(`scale(${sx},${sy})`),
+    beginPath: () => ops.push('beginPath'),
+    rect: (x, y, w, h) => ops.push(`rect(${x},${y},${w},${h})`),
+    clip: () => ops.push('clip'),
+    clearRect: () => {},
+  };
+
+  const root = new Item();
+  root.width = 200;
+  root.height = 200;
+
+  const box = new Item({ parentItem: root });
+  box.x = 10;
+  box.y = 20;
+  box.width = 50;
+  box.height = 50;
+  box.rotation = 45;
+  box.scale = 2;
+  box.clip = true;
+  box.transformOrigin = 'TopLeft'; // origin = (0,0)
+
+  const renderer = new CanvasRenderer({
+    rootItem: root,
+    context2d: fakeCtx,
+    canvas: { width: 200, height: 200 },
+    autoSchedule: false,
+  });
+
+  renderer.render();
+
+  // rotation 45° = PI/4 ≈ 0.7854 radians
+  assert.ok(ops.includes(`rotate(${(Math.PI / 4).toFixed(4)})`), `Should include rotate: ${ops}`);
+  assert.ok(ops.includes('scale(2,2)'), `Should include scale: ${ops}`);
+  // translate to origin (0,0) → translate(0,0), no-op for TopLeft
+  assert.ok(ops.includes('clip'), `Should include clip: ${ops}`);
+  assert.ok(ops.includes('rect(0,0,50,50)'), `Should include clip rect: ${ops}`);
+});
+
+test('Image class has correct status constants', () => {
+  assert.equal(Image.Null,    0);
+  assert.equal(Image.Loading, 1);
+  assert.equal(Image.Ready,   2);
+  assert.equal(Image.Error,   3);
+});
+
+test('Image item starts with Null status when no source', () => {
+  const img = new Image();
+  assert.equal(img.status, Image.Null);
+  assert.equal(img.source, '');
+});
+
+test('Image item transitions to Loading when source is set', () => {
+  const img = new Image();
+  img.source = 'https://example.com/test.png';
+  // In Node.js there is no HTMLImageElement, so it stays Loading
+  assert.equal(img.status, Image.Loading);
+});
+
+test('Image cache is shared across instances for same source', () => {
+  const source = 'http://example.com/shared-cache-test.png';
+  const img1 = new Image({ source });
+  // In Node.js there is no HTMLImageElement, so status stays Loading
+  assert.equal(img1.status, Image.Loading);
+
+  // Second instance with same source should pick up the same cache entry
+  const img2 = new Image({ source });
+  assert.equal(img1.status, img2.status, 'Both instances should share the same status');
+});
+
+test('Image item goes back to Null when source is cleared', () => {
+  const img = new Image({ source: 'http://example.com/img.png' });
+  assert.equal(img.status, Image.Loading);
+  img.source = '';
+  assert.equal(img.status, Image.Null);
+});
+
+test('Text._fontString builds correct CSS font string', () => {
+  const t1 = new Text({ font: { family: 'Arial', pixelSize: 16, bold: false } });
+  assert.equal(t1._fontString(), '16px Arial');
+
+  const t2 = new Text({ font: { family: 'Helvetica', pixelSize: 12, bold: true } });
+  assert.equal(t2._fontString(), 'bold 12px Helvetica');
+});
+
+test('Text.draw uses measurement cache for elide', () => {
+  let callCount = 0;
+  const drawnTexts = [];
+
+  const fakeCtx = {
+    font: '',
+    fillStyle: '',
+    textBaseline: '',
+    measureText: (str) => {
+      callCount += 1;
+      // Return large width to trigger elide (20px per character)
+      return { width: str.length * 20 };
+    },
+    fillText: (str) => { drawnTexts.push(str); },
+  };
+
+  // Use a font string unlikely to be in the cache from other tests
+  const t = new Text({
+    text: 'ElideTestString__unique__' + Date.now(),
+    font: { family: 'monospace', pixelSize: 99, bold: true },
+    elide: 'ElideRight',
+  });
+  // width must be set after construction (Item doesn't pick it up from options)
+  t.width = 60; // small → will elide
+
+  // First draw: should call measureText (cache miss)
+  t.draw(fakeCtx);
+  const firstCallCount = callCount;
+  assert.ok(firstCallCount > 0, 'Should have called measureText on first draw');
+  assert.ok(drawnTexts.length > 0, 'Should have drawn some text');
+  assert.ok(drawnTexts[0].endsWith('…'), 'Should have elided the text with ellipsis');
+
+  // Second draw: same text+font combination → cache hits reduce new measureText calls
+  const callsBefore = callCount;
+  t.draw(fakeCtx);
+  const newCalls = callCount - callsBefore;
+  // The ellipsis character ('…') itself is a new cache key, but the base text is cached.
+  // Net new calls must be fewer than on the first draw (which measured many substrings).
+  assert.ok(newCalls < firstCallCount, `Second draw (${newCalls} new calls) should use cache more than first (${firstCallCount} calls)`);
 });
