@@ -49,6 +49,17 @@ const RUNTIME_TYPES = [
   ['Scene', { kind: 'runtime', runtimeExport: 'Scene', category: 'quick' }],
   ['Rectangle', { kind: 'runtime', runtimeExport: 'Rectangle', category: 'quick', isItem: true }],
   ['MouseArea', { kind: 'runtime', runtimeExport: 'MouseArea', category: 'quick', isItem: true }],
+  // Stage A: animations
+  ['Animation', { kind: 'runtime', runtimeExport: 'Animation', category: 'quick-animation' }],
+  ['NumberAnimation', { kind: 'runtime', runtimeExport: 'NumberAnimation', category: 'quick-animation' }],
+  ['ColorAnimation', { kind: 'runtime', runtimeExport: 'ColorAnimation', category: 'quick-animation' }],
+  ['SequentialAnimation', { kind: 'runtime', runtimeExport: 'SequentialAnimation', category: 'quick-animation' }],
+  ['ParallelAnimation', { kind: 'runtime', runtimeExport: 'ParallelAnimation', category: 'quick-animation' }],
+  // Stage A: states / transitions / behaviors
+  ['PropertyChanges', { kind: 'runtime', runtimeExport: 'PropertyChanges', category: 'quick-states' }],
+  ['State', { kind: 'runtime', runtimeExport: 'State', category: 'quick-states' }],
+  ['Transition', { kind: 'runtime', runtimeExport: 'Transition', category: 'quick-states' }],
+  ['Behavior', { kind: 'runtime', runtimeExport: 'Behavior', category: 'quick-states' }],
 ];
 
 function createDefaultRegistries() {
@@ -59,7 +70,11 @@ function createDefaultRegistries() {
 
   const modules = new ModuleMapperRegistry(typeRegistry);
   modules.registerModule('QtQuick', {
-    listTypes: () => ['Item', 'Rectangle', 'MouseArea', 'Loader', 'CanvasRenderer', 'Scene'],
+    listTypes: () => [
+      'Item', 'Rectangle', 'MouseArea', 'Loader', 'CanvasRenderer', 'Scene',
+      'Animation', 'NumberAnimation', 'ColorAnimation', 'SequentialAnimation', 'ParallelAnimation',
+      'PropertyChanges', 'State', 'Transition', 'Behavior',
+    ],
   });
   modules.registerModule('QtQml', {
     listTypes: () => ['QtObject', 'Component', 'Binding', 'Context', 'ComponentScope'],

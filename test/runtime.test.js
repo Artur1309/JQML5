@@ -311,3 +311,329 @@ test('canvas renderer draws children in z ascending order', () => {
 
   assert.deepEqual(calls.filter((entry) => entry === 'low' || entry === 'high'), ['low', 'high']);
 });
+
+// ---------------------------------------------------------------------------
+// Stage A: Animations
+// ---------------------------------------------------------------------------
+
+test('AnimationTicker.advance steps all registered animations by dt', () => {
+  const {
+    AnimationTicker, NumberAnimation,
+  } = require('../src/runtime');
+  const {
+    QObject,
+  } = require('../src/runtime');
+
+  const ticker = new AnimationTicker();
+  const target = new QObject();
+  target.defineProperty('value', 0);
+
+  const anim = new NumberAnimation({
+    ticker,
+    target,
+    property: 'value',
+    from: 0,
+    to: 100,
+    duration: 1000,
+  });
+
+  anim.start();
+  assert.equal(anim.running, true);
+
+  ticker.advance(500);
+  assert.ok(target.value > 0 && target.value < 100, `Expected value between 0 and 100, got ${target.value}`);
+
+  ticker.advance(500);
+  assert.equal(target.value, 100);
+  assert.equal(anim.running, false);
+});
+
+test('NumberAnimation interpolates from/to with easing', () => {
+  const { AnimationTicker, NumberAnimation } = require('../src/runtime');
+  const { QObject } = require('../src/runtime');
+
+  const ticker = new AnimationTicker();
+  const target = new QObject();
+  target.defineProperty('x', 0);
+
+  const anim = new NumberAnimation({
+    ticker,
+    target,
+    property: 'x',
+    from: 0,
+    to: 200,
+    duration: 400,
+    easing: 'Linear',
+  });
+
+  anim.start();
+  ticker.advance(200);
+  assert.equal(target.x, 100);
+  ticker.advance(200);
+  assert.equal(target.x, 200);
+  assert.equal(anim.running, false);
+});
+
+test('NumberAnimation emits started and finished signals', () => {
+  const { AnimationTicker, NumberAnimation } = require('../src/runtime');
+  const { QObject } = require('../src/runtime');
+
+  const ticker = new AnimationTicker();
+  const target = new QObject();
+  target.defineProperty('val', 0);
+
+  const anim = new NumberAnimation({ ticker, target, property: 'val', from: 0, to: 10, duration: 100 });
+
+  let startedCount = 0;
+  let finishedCount = 0;
+  anim.started.connect(() => { startedCount += 1; });
+  anim.finished.connect(() => { finishedCount += 1; });
+
+  anim.start();
+  assert.equal(startedCount, 1);
+  ticker.advance(100);
+  assert.equal(finishedCount, 1);
+});
+
+test('NumberAnimation loops correctly', () => {
+  const { AnimationTicker, NumberAnimation } = require('../src/runtime');
+  const { QObject } = require('../src/runtime');
+
+  const ticker = new AnimationTicker();
+  const target = new QObject();
+  target.defineProperty('v', 0);
+
+  const anim = new NumberAnimation({ ticker, target, property: 'v', from: 0, to: 10, duration: 100, loops: 2 });
+  anim.start();
+
+  ticker.advance(100);
+  assert.equal(anim.running, true); // still running – second loop
+  ticker.advance(100);
+  assert.equal(target.v, 10);
+  assert.equal(anim.running, false);
+});
+
+test('Animation stop() halts progress and emits stopped', () => {
+  const { AnimationTicker, NumberAnimation } = require('../src/runtime');
+  const { QObject } = require('../src/runtime');
+
+  const ticker = new AnimationTicker();
+  const target = new QObject();
+  target.defineProperty('val', 0);
+
+  const anim = new NumberAnimation({ ticker, target, property: 'val', from: 0, to: 100, duration: 200 });
+  let stopped = false;
+  anim.stopped.connect(() => { stopped = true; });
+
+  anim.start();
+  ticker.advance(100);
+  const midValue = target.val;
+  anim.stop();
+
+  assert.equal(stopped, true);
+  assert.equal(anim.running, false);
+
+  ticker.advance(100);
+  assert.equal(target.val, midValue); // no further change after stop
+});
+
+test('ColorAnimation interpolates hex colors', () => {
+  const { AnimationTicker, ColorAnimation } = require('../src/runtime');
+  const { QObject } = require('../src/runtime');
+
+  const ticker = new AnimationTicker();
+  const target = new QObject();
+  target.defineProperty('color', '#000000');
+
+  const anim = new ColorAnimation({
+    ticker,
+    target,
+    property: 'color',
+    from: '#000000',
+    to: '#ffffff',
+    duration: 100,
+  });
+
+  anim.start();
+  ticker.advance(50);
+  // At 50% the color should be approximately grey
+  assert.ok(typeof target.color === 'string' && target.color.startsWith('#'));
+
+  ticker.advance(50);
+  assert.equal(target.color, '#ffffff');
+});
+
+test('SequentialAnimation runs child animations in order', () => {
+  const { AnimationTicker, NumberAnimation, SequentialAnimation } = require('../src/runtime');
+  const { QObject } = require('../src/runtime');
+
+  const ticker = new AnimationTicker();
+  const target = new QObject();
+  target.defineProperty('x', 0);
+  target.defineProperty('y', 0);
+
+  const anim1 = new NumberAnimation({ ticker, target, property: 'x', from: 0, to: 50, duration: 100 });
+  const anim2 = new NumberAnimation({ ticker, target, property: 'y', from: 0, to: 80, duration: 100 });
+  const seq = new SequentialAnimation({ ticker, animations: [anim1, anim2] });
+
+  seq.start();
+  ticker.advance(100); // complete anim1
+  assert.equal(target.x, 50);
+
+  ticker.advance(100); // complete anim2
+  assert.equal(target.y, 80);
+  assert.equal(seq.running, false);
+});
+
+test('ParallelAnimation runs child animations concurrently', () => {
+  const { AnimationTicker, NumberAnimation, ParallelAnimation } = require('../src/runtime');
+  const { QObject } = require('../src/runtime');
+
+  const ticker = new AnimationTicker();
+  const target = new QObject();
+  target.defineProperty('x', 0);
+  target.defineProperty('y', 0);
+
+  const anim1 = new NumberAnimation({ ticker, target, property: 'x', from: 0, to: 100, duration: 200 });
+  const anim2 = new NumberAnimation({ ticker, target, property: 'y', from: 0, to: 50, duration: 200 });
+  const par = new ParallelAnimation({ ticker, animations: [anim1, anim2] });
+
+  par.start();
+  ticker.advance(100);
+  assert.ok(target.x > 0 && target.x < 100, `x should be between 0 and 100, got ${target.x}`);
+  assert.ok(target.y > 0 && target.y < 50, `y should be between 0 and 50, got ${target.y}`);
+
+  ticker.advance(100);
+  assert.equal(par.running, false);
+});
+
+// ---------------------------------------------------------------------------
+// Stage A: States / PropertyChanges / Transitions
+// ---------------------------------------------------------------------------
+
+test('PropertyChanges.apply() sets target property values', () => {
+  const { Item, PropertyChanges } = require('../src/runtime');
+
+  const rect = new Item();
+  rect.defineProperty('color', '#ffffff');
+
+  const pc = new PropertyChanges({ target: rect, color: '#ff0000' });
+  pc.apply();
+
+  assert.equal(rect.color, '#ff0000');
+});
+
+test('Item state property switches applied PropertyChanges', () => {
+  const { Item, PropertyChanges, State } = require('../src/runtime');
+
+  const root = new Item();
+  root.defineProperty('color', '#ffffff');
+
+  const stateActive = new State({ name: 'active' });
+  const pc = new PropertyChanges({ target: root, color: '#0000ff' });
+  stateActive.addPropertyChanges(pc);
+  root.addState(stateActive);
+
+  assert.equal(root.color, '#ffffff');
+
+  root.state = 'active';
+  assert.equal(root.color, '#0000ff');
+
+  root.state = '';
+  assert.equal(root.color, '#ffffff'); // base value restored
+});
+
+test('Item state switching with multiple PropertyChanges targets', () => {
+  const { Item, PropertyChanges, State, Rectangle } = require('../src/runtime');
+
+  const root = new Item();
+  const child = new Rectangle({ parentItem: root });
+  // Rectangle extends Item which already has 'opacity' defined
+
+  const pressed = new State({ name: 'pressed' });
+  pressed.addPropertyChanges(new PropertyChanges({ target: child, opacity: 0.5 }));
+  root.addState(pressed);
+
+  assert.equal(child.opacity, 1);
+  root.state = 'pressed';
+  assert.equal(child.opacity, 0.5);
+
+  root.state = '';
+  assert.equal(child.opacity, 1);
+});
+
+test('Transition runs NumberAnimation when state changes', () => {
+  const { Item, PropertyChanges, State, Transition, NumberAnimation, AnimationTicker } = require('../src/runtime');
+
+  const ticker = new AnimationTicker();
+  const root = new Item();
+  // Item already defines 'x', no need to defineProperty
+
+  const stateRight = new State({ name: 'right' });
+  stateRight.addPropertyChanges(new PropertyChanges({ target: root, x: 200 }));
+  root.addState(stateRight);
+
+  const anim = new NumberAnimation({ ticker, duration: 100, easing: 'Linear' });
+  const transition = new Transition({ from: '*', to: 'right', animations: [anim] });
+  root.addTransition(transition);
+
+  root.state = 'right';
+
+  // State should not be immediately applied (animation runs)
+  assert.ok(root.x < 200, `x should be < 200, got ${root.x}`);
+  assert.equal(root._activeStateAnimations.length, 1);
+
+  ticker.advance(100);
+  assert.equal(root.x, 200);
+  assert.equal(root._activeStateAnimations[0].running, false);
+});
+
+// ---------------------------------------------------------------------------
+// Stage A: Behavior
+// ---------------------------------------------------------------------------
+
+test('Behavior intercepts plain-value assignment and animates to target', () => {
+  const { Item, Behavior, NumberAnimation, AnimationTicker } = require('../src/runtime');
+
+  const ticker = new AnimationTicker();
+  const item = new Item();
+  // Item already defines 'x'
+
+  const anim = new NumberAnimation({ ticker, duration: 100, easing: 'Linear' });
+  const behavior = new Behavior({ animation: anim });
+  item.addBehavior('x', behavior);
+
+  item.x = 100;
+
+  // Value should not have jumped immediately
+  assert.ok(item.x < 100, `x should be animating, got ${item.x}`);
+
+  ticker.advance(50);
+  assert.ok(item.x >= 50 && item.x < 100, `x should be ~50, got ${item.x}`);
+
+  ticker.advance(50);
+  assert.equal(item.x, 100);
+});
+
+test('Behavior does not intercept binding assignments', () => {
+  const { Item, Behavior, NumberAnimation, AnimationTicker, Binding } = require('../src/runtime');
+
+  const ticker = new AnimationTicker();
+  const source = new Item();
+  source.defineProperty('offset', 50);
+
+  const item = new Item();
+  // Item already defines 'x'
+
+  const anim = new NumberAnimation({ ticker, duration: 200 });
+  const behavior = new Behavior({ animation: anim });
+  item.addBehavior('x', behavior);
+
+  // Assign a binding — should bypass behavior
+  item.x = new Binding(() => source.offset * 2);
+  assert.equal(item.x, 100); // binding evaluated immediately
+
+  source.offset = 75;
+  assert.equal(item.x, 150); // binding re-evaluated
+  assert.equal(anim.running, false);
+});

@@ -32,6 +32,68 @@ Item {
   assert.equal(ast.rootObject.children[0].typeName, 'Rectangle');
 });
 
+test('QML parser handles Behavior on <prop> syntax', () => {
+  const ast = parseQml(`
+import QtQuick 2.15
+Rectangle {
+  id: box
+  x: 0
+  color: "#ff0000"
+
+  Behavior on x {
+    NumberAnimation { duration: 200 }
+  }
+
+  Behavior on color {
+    ColorAnimation { duration: 300 }
+  }
+}
+`, 'BehaviorTest.qml');
+
+  assert.equal(ast.rootObject.typeName, 'Rectangle');
+  assert.equal(ast.rootObject.behaviors.length, 2);
+  assert.equal(ast.rootObject.behaviors[0].property, 'x');
+  assert.equal(ast.rootObject.behaviors[0].animation.typeName, 'NumberAnimation');
+  assert.equal(ast.rootObject.behaviors[1].property, 'color');
+  assert.equal(ast.rootObject.behaviors[1].animation.typeName, 'ColorAnimation');
+});
+
+test('QML parser handles states array syntax', () => {
+  const ast = parseQml(`
+import QtQuick 2.15
+Rectangle {
+  id: box
+  color: "#ffffff"
+
+  states: [
+    State {
+      name: "active"
+      PropertyChanges { target: box; color: "#0000ff" }
+    }
+  ]
+
+  transitions: [
+    Transition {
+      from: "*"
+      to: "active"
+      NumberAnimation { duration: 150 }
+    }
+  ]
+}
+`, 'StatesTest.qml');
+
+  const statesProp = ast.rootObject.properties.find((p) => p.name === 'states');
+  assert.ok(statesProp, 'states property should exist');
+  assert.equal(statesProp.value.kind, 'ArrayValue');
+  assert.equal(statesProp.value.items.length, 1);
+  assert.equal(statesProp.value.items[0].object.typeName, 'State');
+
+  const transitionsProp = ast.rootObject.properties.find((p) => p.name === 'transitions');
+  assert.ok(transitionsProp, 'transitions property should exist');
+  assert.equal(transitionsProp.value.kind, 'ArrayValue');
+  assert.equal(transitionsProp.value.items[0].object.typeName, 'Transition');
+});
+
 test('compiler builds browser bundle with copied assets', async () => {
   const fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), 'jqmlc-fixture-'));
   const outdir = fs.mkdtempSync(path.join(os.tmpdir(), 'jqmlc-dist-'));
