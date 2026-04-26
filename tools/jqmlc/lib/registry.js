@@ -82,6 +82,10 @@ const RUNTIME_TYPES = [
   ['Keys', { kind: 'runtime', runtimeExport: 'Keys', category: 'quick-input' }],
   ['TapHandler', { kind: 'runtime', runtimeExport: 'TapHandler', category: 'quick-input', isItem: true }],
   ['DragHandler', { kind: 'runtime', runtimeExport: 'DragHandler', category: 'quick-input', isItem: true }],
+  // Stage H: pointer handler extensions
+  ['HoverHandler', { kind: 'runtime', runtimeExport: 'HoverHandler', category: 'quick-input', isItem: true }],
+  ['WheelHandler', { kind: 'runtime', runtimeExport: 'WheelHandler', category: 'quick-input', isItem: true }],
+  ['PinchHandler', { kind: 'runtime', runtimeExport: 'PinchHandler', category: 'quick-input', isItem: true }],
   // Stage D: controls MVP
   ['Theme', { kind: 'runtime', runtimeExport: 'Theme', category: 'controls' }],
   ['Button', { kind: 'runtime', runtimeExport: 'Button', category: 'controls', isItem: true }],
@@ -118,6 +122,7 @@ function createDefaultRegistries() {
       'ListElement', 'ListModel', 'Repeater', 'Flickable', 'ListView',
       'Row', 'Column', 'Flow',
       'TapHandler', 'DragHandler',
+      'HoverHandler', 'WheelHandler', 'PinchHandler',
     ],
   });
   modules.registerModule('QtQml', {
