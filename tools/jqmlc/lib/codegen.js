@@ -153,6 +153,12 @@ function generateComponentFactory(component, moduleIdMap) {
   output += `      }\n`;
   output += `      for (const childNode of node.children) {\n`;
   output += `        const childObj = __createObjectTree(childNode, object, scopeState);\n`;
+  output += `        // Stage B: wire ListElement children into parent ListModel\n`;
+  output += `        if (childObj instanceof __runtime.ListElement && object instanceof __runtime.ListModel) {\n`;
+  output += `          object.append(childObj._rowData());\n`;
+  output += `          childObj.destroy();\n`;
+  output += `          continue;\n`;
+  output += `        }\n`;
   output += `        // Stage A: wire State/PropertyChanges/Transition children to parent\n`;
   output += `        if (childObj instanceof __runtime.State && typeof object.addState === 'function') {\n`;
   output += `          object.addState(childObj);\n`;
@@ -202,7 +208,17 @@ function generateComponentFactory(component, moduleIdMap) {
   output += `      if (valueNode.kind === 'BooleanValue') return valueNode.value;\n`;
   output += `      if (valueNode.kind === 'NullValue') return null;\n`;
   output += `      if (valueNode.kind === 'IdentifierValue' && valueNode.name in scopeState.ids) return scopeState.ids[valueNode.name];\n`;
-  output += `      if (valueNode.kind === 'ObjectValue') return __createObjectTree(valueNode.object, object, scopeState);\n`;
+  output += `      if (valueNode.kind === 'ObjectValue') {
+        // Stage B: implicitly wrap delegate object values in a Component
+        if (propertyName === 'delegate') {
+          const templateNode = valueNode.object;
+          return new __runtime.Component(({ parent: componentParent, context, componentScope }) => {
+            const nestedState = __createScopeState(componentParent, context, componentScope);
+            return __createObjectTree(templateNode, componentParent, nestedState);
+          });
+        }
+        return __createObjectTree(valueNode.object, object, scopeState);
+      }\n`;
   output += `      if (valueNode.kind === 'JsBlockValue') return valueNode;\n`;
   output += `      // Stage A: array of objects (states: [...], transitions: [...])\n`;
   output += `      if (valueNode.kind === 'ArrayValue') {\n`;

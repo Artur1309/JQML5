@@ -2192,6 +2192,523 @@ class Scene {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Text
+// ---------------------------------------------------------------------------
+
+class Text extends Item {
+  constructor(options = {}) {
+    super(options);
+
+    this.defineProperty('text', options.text ?? '');
+    this.defineProperty('color', options.color ?? '#000000');
+    this.defineProperty('font', options.font ?? { family: 'sans-serif', pixelSize: 14, bold: false });
+    this.defineProperty('horizontalAlignment', options.horizontalAlignment ?? 'left');
+    this.defineProperty('verticalAlignment', options.verticalAlignment ?? 'top');
+    this.defineProperty('wrapMode', options.wrapMode ?? 'NoWrap');
+    this.defineProperty('elide', options.elide ?? 'ElideNone');
+  }
+
+  draw(context) {
+    if (!context) return;
+    const text = String(this.text ?? '');
+    if (!text) return;
+
+    const font = this.font || {};
+    const size = font.pixelSize || 14;
+    const family = font.family || 'sans-serif';
+    const bold = font.bold ? 'bold ' : '';
+    context.font = `${bold}${size}px ${family}`;
+    context.fillStyle = this.color || '#000000';
+    context.textBaseline = 'top';
+    context.fillText(text, 0, 0);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Stage B: ListElement – data holder for ListModel rows
+// ---------------------------------------------------------------------------
+
+class ListElement extends QObject {
+  constructor(options = {}) {
+    super();
+  }
+
+  _rowData() {
+    const data = {};
+    for (const [key, value] of this._propertyValues.entries()) {
+      data[key] = value;
+    }
+    return data;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Stage B: ListModel
+// ---------------------------------------------------------------------------
+
+class ListModel extends QObject {
+  constructor(options = {}) {
+    super();
+
+    this._rows = [];
+
+    this.defineSignal('countChanged');
+    this.defineSignal('rowsInserted');
+    this.defineSignal('rowsRemoved');
+    this.defineSignal('rowsMoved');
+    this.defineSignal('dataChanged');
+    this.defineProperty('count', 0);
+
+    if (Array.isArray(options.rows)) {
+      for (const row of options.rows) {
+        this.append(row);
+      }
+    }
+  }
+
+  _setCount(n) {
+    this._setPropertyValue('count', n);
+  }
+
+  get(index) {
+    if (index < 0 || index >= this._rows.length) return null;
+    return { ...this._rows[index] };
+  }
+
+  append(rowData) {
+    const index = this._rows.length;
+    this._rows.push({ ...rowData });
+    this._setCount(this._rows.length);
+    this.rowsInserted.emit(index, 1);
+  }
+
+  insert(index, rowData) {
+    const i = Math.max(0, Math.min(index, this._rows.length));
+    this._rows.splice(i, 0, { ...rowData });
+    this._setCount(this._rows.length);
+    this.rowsInserted.emit(i, 1);
+  }
+
+  remove(index, count = 1) {
+    if (this._rows.length === 0) return;
+    const i = Math.max(0, Math.min(index, this._rows.length - 1));
+    const n = Math.min(count, this._rows.length - i);
+    if (n <= 0) return;
+    this._rows.splice(i, n);
+    this._setCount(this._rows.length);
+    this.rowsRemoved.emit(i, n);
+  }
+
+  move(from, to, count = 1) {
+    const len = this._rows.length;
+    if (from < 0 || from >= len || to < 0 || to >= len || count <= 0) return;
+    const moved = this._rows.splice(from, count);
+    const insertAt = from < to ? to - count + 1 : to;
+    this._rows.splice(insertAt, 0, ...moved);
+    this.rowsMoved.emit(from, to, count);
+  }
+
+  clear() {
+    const oldCount = this._rows.length;
+    this._rows = [];
+    this._setCount(0);
+    if (oldCount > 0) {
+      this.rowsRemoved.emit(0, oldCount);
+    }
+  }
+
+  set(index, rowData) {
+    if (index < 0 || index >= this._rows.length) return;
+    this._rows[index] = { ...this._rows[index], ...rowData };
+    this.dataChanged.emit(index, Object.keys(rowData));
+  }
+
+  setProperty(index, role, value) {
+    if (index < 0 || index >= this._rows.length) return;
+    this._rows[index][role] = value;
+    this.dataChanged.emit(index, [role]);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Stage B: helpers for model access
+// ---------------------------------------------------------------------------
+
+function _modelCount(model) {
+  if (model instanceof ListModel) return model.count;
+  if (Array.isArray(model)) return model.length;
+  if (typeof model === 'number' && model >= 0) return Math.floor(model);
+  return 0;
+}
+
+function _modelRowData(model, index) {
+  if (model instanceof ListModel) return model.get(index);
+  if (Array.isArray(model)) return model[index] ?? null;
+  if (typeof model === 'number') return index;
+  return null;
+}
+
+function _buildDelegateContext(parentContext, model, index, rowData) {
+  const contextValues = {
+    index,
+    model,
+    modelData: rowData,
+  };
+  if (rowData !== null && typeof rowData === 'object') {
+    Object.assign(contextValues, rowData);
+  }
+  return new Context(parentContext, contextValues);
+}
+
+// ---------------------------------------------------------------------------
+// Stage B: Repeater
+// ---------------------------------------------------------------------------
+
+class Repeater extends Item {
+  constructor(options = {}) {
+    super(options);
+
+    this._delegateItems = [];
+    this._modelDisconnectors = [];
+
+    this.defineProperty('model', null);
+    this.defineProperty('delegate', null);
+    this.defineProperty('count', 0);
+
+    this.defineSignal('itemAdded');
+    this.defineSignal('itemRemoved');
+
+    // Watch model/delegate changes
+    this.connect('modelChanged', (newModel, oldModel) => this._onModelReplaced(newModel, oldModel));
+    this.connect('delegateChanged', () => this._rebuild());
+    this.connect('parentItemChanged', () => this._rebuild());
+
+    if (options.model !== undefined) this.model = options.model;
+    if (options.delegate !== undefined) this.delegate = options.delegate;
+  }
+
+  _disconnectModel() {
+    for (const disconnect of this._modelDisconnectors) {
+      disconnect();
+    }
+    this._modelDisconnectors = [];
+  }
+
+  _onModelReplaced(newModel, _oldModel) {
+    this._disconnectModel();
+    if (newModel instanceof ListModel) {
+      this._modelDisconnectors.push(
+        newModel.rowsInserted.connect((index, count) => this._onRowsInserted(index, count)),
+      );
+      this._modelDisconnectors.push(
+        newModel.rowsRemoved.connect((index, count) => this._onRowsRemoved(index, count)),
+      );
+      this._modelDisconnectors.push(
+        newModel.rowsMoved.connect((from, to, count) => this._onRowsMoved(from, to, count)),
+      );
+      this._modelDisconnectors.push(
+        newModel.dataChanged.connect((index) => this._onDataChanged(index)),
+      );
+    }
+    this._rebuild();
+  }
+
+  _rebuild() {
+    // destroy existing
+    for (const item of this._delegateItems) {
+      if (item) item.destroy();
+    }
+    this._delegateItems = [];
+
+    const model = this.model;
+    const delegate = this.delegate;
+    if (!delegate || !(delegate instanceof Component)) return;
+
+    const count = _modelCount(model);
+    for (let i = 0; i < count; i++) {
+      const item = this._createDelegateAt(i);
+      this._delegateItems.push(item);
+      if (item) this.itemAdded.emit(i, item);
+    }
+    this._setPropertyValue('count', this._delegateItems.filter(Boolean).length);
+  }
+
+  _createDelegateAt(index) {
+    const delegate = this.delegate;
+    if (!(delegate instanceof Component)) return null;
+
+    const model = this.model;
+    const rowData = _modelRowData(model, index);
+    const parentContext = this.getContext();
+    const delegateContext = _buildDelegateContext(parentContext, model, index, rowData);
+    const parentItem = this.parentItem;
+    const scope = this.getComponentScope();
+
+    return delegate.createObject(parentItem, {}, delegateContext, scope);
+  }
+
+  _onRowsInserted(index, count) {
+    const delegate = this.delegate;
+    if (!(delegate instanceof Component)) return;
+
+    // Shift existing items upward
+    const newItems = [];
+    for (let i = 0; i < count; i++) {
+      newItems.push(this._createDelegateAt(index + i));
+    }
+    this._delegateItems.splice(index, 0, ...newItems);
+
+    // Update index context values for items after insertion point
+    this._updateIndexes(index + count);
+
+    for (let i = 0; i < count; i++) {
+      const item = this._delegateItems[index + i];
+      if (item) this.itemAdded.emit(index + i, item);
+    }
+    this._setPropertyValue('count', this._delegateItems.filter(Boolean).length);
+  }
+
+  _onRowsRemoved(index, count) {
+    const removed = this._delegateItems.splice(index, count);
+    for (const item of removed) {
+      if (item) {
+        this.itemRemoved.emit(item);
+        item.destroy();
+      }
+    }
+    this._updateIndexes(index);
+    this._setPropertyValue('count', this._delegateItems.filter(Boolean).length);
+  }
+
+  _onRowsMoved(from, to, count) {
+    // simplest: full rebuild on move
+    this._rebuild();
+  }
+
+  _onDataChanged(index) {
+    // recreate delegate at index
+    const old = this._delegateItems[index];
+    if (old) old.destroy();
+    const item = this._createDelegateAt(index);
+    this._delegateItems[index] = item;
+  }
+
+  _updateIndexes(_fromIndex) {
+    // Context values are captured at creation time; index updates require recreation.
+    // For now this is a no-op (contexts are immutable snapshots).
+  }
+
+  itemAt(index) {
+    return this._delegateItems[index] ?? null;
+  }
+
+  destroy() {
+    this._disconnectModel();
+    for (const item of this._delegateItems) {
+      if (item) item.destroy();
+    }
+    this._delegateItems = [];
+    super.destroy();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Stage B: ListView
+// ---------------------------------------------------------------------------
+
+class ListView extends Item {
+  constructor(options = {}) {
+    super(options);
+
+    this._delegateItems = [];        // sparse array of created delegate instances
+    this._delegateHeight = 40;       // measured/default row height
+    this._modelDisconnectors = [];
+    this._rebuilding = false;
+
+    this.defineProperty('model', null);
+    this.defineProperty('delegate', null);
+    this.defineProperty('contentY', 0);
+    this.defineProperty('contentHeight', 0);
+    this.defineProperty('spacing', 0);
+    this.defineProperty('cacheBuffer', 40);  // extra pixels above/below to pre-create
+
+    this.defineSignal('contentYChanged');
+
+    this.connect('modelChanged', (newModel, oldModel) => this._onModelReplaced(newModel, oldModel));
+    this.connect('delegateChanged', () => this._rebuild());
+    this.connect('contentYChanged', () => this._updateVirtualization());
+    this.connect('heightChanged', () => this._updateVirtualization());
+
+    if (options.model !== undefined) this.model = options.model;
+    if (options.delegate !== undefined) this.delegate = options.delegate;
+    if (options.contentY !== undefined) this.contentY = options.contentY;
+  }
+
+  // Alias: viewportHeight reads height
+  get viewportHeight() {
+    return this.height;
+  }
+
+  _disconnectModel() {
+    for (const disconnect of this._modelDisconnectors) {
+      disconnect();
+    }
+    this._modelDisconnectors = [];
+  }
+
+  _onModelReplaced(newModel, _oldModel) {
+    this._disconnectModel();
+    if (newModel instanceof ListModel) {
+      this._modelDisconnectors.push(
+        newModel.rowsInserted.connect(() => this._rebuild()),
+      );
+      this._modelDisconnectors.push(
+        newModel.rowsRemoved.connect(() => this._rebuild()),
+      );
+      this._modelDisconnectors.push(
+        newModel.rowsMoved.connect(() => this._rebuild()),
+      );
+      this._modelDisconnectors.push(
+        newModel.dataChanged.connect((index) => this._onDataChanged(index)),
+      );
+    }
+    this._rebuild();
+  }
+
+  _rowHeight() {
+    return this._delegateHeight + (this.spacing || 0);
+  }
+
+  _totalContentHeight() {
+    const count = _modelCount(this.model);
+    if (count === 0) return 0;
+    return count * this._delegateHeight + Math.max(0, count - 1) * (this.spacing || 0);
+  }
+
+  _rebuild() {
+    if (this._rebuilding) return;
+    this._rebuilding = true;
+    try {
+      for (const item of this._delegateItems) {
+        if (item) item.destroy();
+      }
+      this._delegateItems = [];
+
+      const count = _modelCount(this.model);
+      this._delegateItems = new Array(count).fill(null);
+
+      this._setPropertyValue('contentHeight', this._totalContentHeight());
+      this._updateVirtualization();
+    } finally {
+      this._rebuilding = false;
+    }
+  }
+
+  _updateVirtualization() {
+    const count = _modelCount(this.model);
+    if (count === 0 || !(this.delegate instanceof Component)) {
+      this._setPropertyValue('contentHeight', 0);
+      return;
+    }
+
+    this._setPropertyValue('contentHeight', this._totalContentHeight());
+
+    const viewH = this.height || 0;
+    const contentY = Math.max(0, this.contentY || 0);
+    const buffer = this.cacheBuffer || 0;
+    const rowH = this._rowHeight();
+
+    const firstVisible = Math.max(0, Math.floor((contentY - buffer) / rowH));
+    const lastVisible = Math.min(
+      count - 1,
+      Math.ceil((contentY + viewH + buffer) / rowH),
+    );
+
+    // Ensure sparse array is large enough
+    if (this._delegateItems.length < count) {
+      this._delegateItems.length = count;
+    }
+
+    // Destroy items outside visible range
+    for (let i = 0; i < this._delegateItems.length; i++) {
+      const item = this._delegateItems[i];
+      if (item && (i < firstVisible || i > lastVisible)) {
+        item.destroy();
+        this._delegateItems[i] = null;
+      }
+    }
+
+    // Create and position items within visible range
+    for (let i = firstVisible; i <= lastVisible && i < count; i++) {
+      if (!this._delegateItems[i]) {
+        this._delegateItems[i] = this._createDelegateAt(i);
+        // Measure height from first item
+        if (i === 0 && this._delegateItems[i]) {
+          const h = this._delegateItems[i].height || this._delegateItems[i].implicitHeight || 40;
+          if (h > 0) {
+            this._delegateHeight = h;
+            this._setPropertyValue('contentHeight', this._totalContentHeight());
+          }
+        }
+      }
+      const item = this._delegateItems[i];
+      if (item) {
+        item.y = i * this._rowHeight() - contentY;
+        item.x = 0;
+      }
+    }
+  }
+
+  _createDelegateAt(index) {
+    const delegate = this.delegate;
+    if (!(delegate instanceof Component)) return null;
+
+    const model = this.model;
+    const rowData = _modelRowData(model, index);
+    const parentContext = this.getContext();
+    const delegateContext = _buildDelegateContext(parentContext, model, index, rowData);
+    const scope = this.getComponentScope();
+
+    return delegate.createObject(this, {}, delegateContext, scope);
+  }
+
+  _onDataChanged(index) {
+    const old = this._delegateItems[index];
+    if (old) {
+      old.destroy();
+      this._delegateItems[index] = null;
+    }
+    // Will be recreated on next _updateVirtualization call
+    this._updateVirtualization();
+  }
+
+  // Return number of currently created (non-null) delegate items
+  get createdCount() {
+    return this._delegateItems.filter(Boolean).length;
+  }
+
+  itemAt(index) {
+    return this._delegateItems[index] ?? null;
+  }
+
+  positionViewAtIndex(index, mode = 0) {
+    const count = _modelCount(this.model);
+    if (index < 0 || index >= count) return;
+    const rowH = this._rowHeight();
+    this.contentY = index * rowH;
+  }
+
+  destroy() {
+    this._disconnectModel();
+    for (const item of this._delegateItems) {
+      if (item) item.destroy();
+    }
+    this._delegateItems = [];
+    super.destroy();
+  }
+}
+
 const runtimeExports = {
   Signal,
   Binding,
@@ -2206,6 +2723,7 @@ const runtimeExports = {
   Scene,
   Rectangle,
   MouseArea,
+  Text,
   // Stage A: animations
   Easing,
   AnimationTicker,
@@ -2219,6 +2737,11 @@ const runtimeExports = {
   State,
   Transition,
   Behavior,
+  // Stage B: models / views
+  ListElement,
+  ListModel,
+  Repeater,
+  ListView,
 };
 
 if (typeof module !== 'undefined' && module.exports) {

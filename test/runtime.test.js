@@ -637,3 +637,350 @@ test('Behavior does not intercept binding assignments', () => {
   assert.equal(item.x, 150); // binding re-evaluated
   assert.equal(anim.running, false);
 });
+
+// ---------------------------------------------------------------------------
+// Stage B: ListModel
+// ---------------------------------------------------------------------------
+
+test('ListModel append adds rows and emits countChanged and rowsInserted', () => {
+  const { ListModel } = require('../src/runtime');
+
+  const model = new ListModel();
+  const insertedEvents = [];
+  const countEvents = [];
+
+  model.rowsInserted.connect((index, count) => insertedEvents.push({ index, count }));
+  model.countChanged.connect((n) => countEvents.push(n));
+
+  model.append({ name: 'Alice', age: 30 });
+  model.append({ name: 'Bob', age: 25 });
+
+  assert.equal(model.count, 2);
+  assert.deepEqual(insertedEvents, [{ index: 0, count: 1 }, { index: 1, count: 1 }]);
+  assert.deepEqual(countEvents, [1, 2]);
+  assert.deepEqual(model.get(0), { name: 'Alice', age: 30 });
+  assert.deepEqual(model.get(1), { name: 'Bob', age: 25 });
+});
+
+test('ListModel insert places row at correct index', () => {
+  const { ListModel } = require('../src/runtime');
+
+  const model = new ListModel();
+  model.append({ name: 'Alice' });
+  model.append({ name: 'Charlie' });
+  model.insert(1, { name: 'Bob' });
+
+  assert.equal(model.count, 3);
+  assert.deepEqual(model.get(0), { name: 'Alice' });
+  assert.deepEqual(model.get(1), { name: 'Bob' });
+  assert.deepEqual(model.get(2), { name: 'Charlie' });
+});
+
+test('ListModel remove deletes rows and emits rowsRemoved', () => {
+  const { ListModel } = require('../src/runtime');
+
+  const model = new ListModel({ rows: [{ n: 1 }, { n: 2 }, { n: 3 }] });
+  const removedEvents = [];
+  model.rowsRemoved.connect((index, count) => removedEvents.push({ index, count }));
+
+  model.remove(1);
+
+  assert.equal(model.count, 2);
+  assert.deepEqual(model.get(0), { n: 1 });
+  assert.deepEqual(model.get(1), { n: 3 });
+  assert.deepEqual(removedEvents, [{ index: 1, count: 1 }]);
+});
+
+test('ListModel remove with count removes multiple rows', () => {
+  const { ListModel } = require('../src/runtime');
+
+  const model = new ListModel({ rows: [{ n: 1 }, { n: 2 }, { n: 3 }, { n: 4 }] });
+  model.remove(1, 2);
+
+  assert.equal(model.count, 2);
+  assert.deepEqual(model.get(0), { n: 1 });
+  assert.deepEqual(model.get(1), { n: 4 });
+});
+
+test('ListModel move reorders rows and emits rowsMoved', () => {
+  const { ListModel } = require('../src/runtime');
+
+  const model = new ListModel({ rows: [{ n: 1 }, { n: 2 }, { n: 3 }] });
+  const movedEvents = [];
+  model.rowsMoved.connect((from, to, count) => movedEvents.push({ from, to, count }));
+
+  model.move(0, 2, 1);
+
+  assert.equal(model.count, 3);
+  assert.deepEqual(model.get(0), { n: 2 });
+  assert.deepEqual(model.get(1), { n: 3 });
+  assert.deepEqual(model.get(2), { n: 1 });
+  assert.deepEqual(movedEvents, [{ from: 0, to: 2, count: 1 }]);
+});
+
+test('ListModel clear empties all rows', () => {
+  const { ListModel } = require('../src/runtime');
+
+  const model = new ListModel({ rows: [{ n: 1 }, { n: 2 }] });
+  model.clear();
+
+  assert.equal(model.count, 0);
+  assert.equal(model.get(0), null);
+});
+
+test('ListModel set updates existing row and emits dataChanged', () => {
+  const { ListModel } = require('../src/runtime');
+
+  const model = new ListModel({ rows: [{ name: 'Alice', age: 30 }] });
+  const changed = [];
+  model.dataChanged.connect((index, roles) => changed.push({ index, roles }));
+
+  model.set(0, { age: 31 });
+
+  assert.deepEqual(model.get(0), { name: 'Alice', age: 31 });
+  assert.deepEqual(changed, [{ index: 0, roles: ['age'] }]);
+});
+
+test('ListModel setProperty updates single role and emits dataChanged', () => {
+  const { ListModel } = require('../src/runtime');
+
+  const model = new ListModel({ rows: [{ x: 1, y: 2 }] });
+  const changed = [];
+  model.dataChanged.connect((index, roles) => changed.push({ index, roles }));
+
+  model.setProperty(0, 'x', 99);
+
+  assert.equal(model.get(0).x, 99);
+  assert.equal(model.get(0).y, 2);
+  assert.deepEqual(changed, [{ index: 0, roles: ['x'] }]);
+});
+
+test('ListModel get returns a copy (not a reference)', () => {
+  const { ListModel } = require('../src/runtime');
+
+  const model = new ListModel({ rows: [{ name: 'Alice' }] });
+  const row = model.get(0);
+  row.name = 'Modified';
+
+  assert.equal(model.get(0).name, 'Alice');
+});
+
+// ---------------------------------------------------------------------------
+// Stage B: Repeater
+// ---------------------------------------------------------------------------
+
+test('Repeater creates delegate items for each model row', () => {
+  const { ListModel, Repeater, Component, Item, Context, ComponentScope } = require('../src/runtime');
+
+  const model = new ListModel({ rows: [{ label: 'A' }, { label: 'B' }, { label: 'C' }] });
+
+  const parent = new Item();
+  parent.width = 200;
+  parent.height = 400;
+
+  const scope = new ComponentScope();
+  const ctx = new Context(null, {});
+
+  const delegate = new Component(({ parent: p, context }) => {
+    const item = new Item({ parentItem: p });
+    item.defineProperty('label', context ? context.lookup('label') : '');
+    return item;
+  });
+
+  const repeater = new Repeater({
+    parentItem: parent,
+    model,
+    delegate,
+    context: ctx,
+    componentScope: scope,
+  });
+
+  assert.equal(repeater.count, 3);
+  assert.ok(repeater.itemAt(0) !== null);
+  assert.ok(repeater.itemAt(1) !== null);
+  assert.ok(repeater.itemAt(2) !== null);
+});
+
+test('Repeater updates when model rows are inserted', () => {
+  const { ListModel, Repeater, Component, Item, Context, ComponentScope } = require('../src/runtime');
+
+  const model = new ListModel({ rows: [{ n: 1 }, { n: 2 }] });
+  const parent = new Item();
+  const ctx = new Context(null, {});
+  const scope = new ComponentScope();
+
+  const delegate = new Component(({ parent: p }) => new Item({ parentItem: p }));
+  const repeater = new Repeater({ parentItem: parent, model, delegate, context: ctx, componentScope: scope });
+
+  assert.equal(repeater.count, 2);
+
+  model.append({ n: 3 });
+  assert.equal(repeater.count, 3);
+
+  model.insert(0, { n: 0 });
+  assert.equal(repeater.count, 4);
+});
+
+test('Repeater updates when model rows are removed', () => {
+  const { ListModel, Repeater, Component, Item, Context, ComponentScope } = require('../src/runtime');
+
+  const model = new ListModel({ rows: [{ n: 1 }, { n: 2 }, { n: 3 }] });
+  const parent = new Item();
+  const ctx = new Context(null, {});
+  const scope = new ComponentScope();
+
+  const delegate = new Component(({ parent: p }) => new Item({ parentItem: p }));
+  const repeater = new Repeater({ parentItem: parent, model, delegate, context: ctx, componentScope: scope });
+
+  assert.equal(repeater.count, 3);
+
+  model.remove(1);
+  assert.equal(repeater.count, 2);
+});
+
+test('Repeater exposes index and modelData in delegate context', () => {
+  const { ListModel, Repeater, Component, Item, Context, ComponentScope } = require('../src/runtime');
+
+  const model = new ListModel({ rows: [{ name: 'Alice' }, { name: 'Bob' }] });
+  const parent = new Item();
+  const ctx = new Context(null, {});
+  const scope = new ComponentScope();
+  const captured = [];
+
+  const delegate = new Component(({ parent: p, context }) => {
+    captured.push({
+      index: context.lookup('index'),
+      modelData: context.lookup('modelData'),
+      name: context.lookup('name'),
+    });
+    return new Item({ parentItem: p });
+  });
+
+  const repeater = new Repeater({ parentItem: parent, model, delegate, context: ctx, componentScope: scope });
+
+  assert.equal(captured.length, 2);
+  assert.equal(captured[0].index, 0);
+  assert.deepEqual(captured[0].modelData, { name: 'Alice' });
+  assert.equal(captured[0].name, 'Alice');
+  assert.equal(captured[1].index, 1);
+  assert.equal(captured[1].name, 'Bob');
+});
+
+// ---------------------------------------------------------------------------
+// Stage B: ListView
+// ---------------------------------------------------------------------------
+
+test('ListView creates delegates for visible range', () => {
+  const { ListModel, ListView, Component, Item, Context, ComponentScope } = require('../src/runtime');
+
+  const model = new ListModel();
+  for (let i = 0; i < 20; i++) model.append({ n: i });
+
+  const listView = new ListView();
+  listView.width = 200;
+  listView.height = 200;  // shows 5 rows of 40px each
+  listView._delegateHeight = 40;
+
+  const ctx = new Context(null, {});
+  listView.setContext(ctx);
+
+  const delegate = new Component(({ parent: p, context }) => {
+    const item = new Item({ parentItem: p });
+    item.height = 40;
+    return item;
+  });
+
+  listView.model = model;
+  listView.delegate = delegate;
+
+  // With height=200 and rowHeight=40, visible range is ~5 items
+  // with default cacheBuffer of 40, up to 7 items may be created
+  const created = listView.createdCount;
+  assert.ok(created >= 5 && created <= 10, `Expected 5-10 items created, got ${created}`);
+});
+
+test('ListView virtualization: scrolling changes which items are created', () => {
+  const { ListModel, ListView, Component, Item, Context, ComponentScope } = require('../src/runtime');
+
+  const model = new ListModel();
+  for (let i = 0; i < 50; i++) model.append({ n: i });
+
+  const listView = new ListView();
+  listView.width = 200;
+  listView.height = 200;
+  listView._delegateHeight = 40;
+  listView.cacheBuffer = 0;
+
+  listView.setContext(new Context(null, {}));
+
+  const delegate = new Component(({ parent: p }) => {
+    const item = new Item({ parentItem: p });
+    item.height = 40;
+    return item;
+  });
+
+  listView.model = model;
+  listView.delegate = delegate;
+
+  const createdAtTop = listView.createdCount;
+  assert.ok(listView.itemAt(0) !== null, 'item 0 should exist at top');
+  assert.equal(listView.itemAt(40), null, 'item 40 should not exist at top');
+
+  // Scroll to row 20 (offset 800)
+  listView.contentY = 800;
+
+  assert.equal(listView.itemAt(0), null, 'item 0 should be destroyed after scroll');
+  assert.ok(listView.itemAt(20) !== null, 'item 20 should exist after scroll');
+});
+
+test('ListView contentHeight equals count * delegateHeight', () => {
+  const { ListModel, ListView, Component, Item, Context } = require('../src/runtime');
+
+  const model = new ListModel();
+  for (let i = 0; i < 10; i++) model.append({ n: i });
+
+  const listView = new ListView();
+  listView.width = 200;
+  listView.height = 200;
+  listView._delegateHeight = 50;
+  listView.setContext(new Context(null, {}));
+
+  const delegate = new Component(({ parent: p }) => {
+    const item = new Item({ parentItem: p });
+    item.height = 50;
+    return item;
+  });
+
+  listView.model = model;
+  listView.delegate = delegate;
+
+  assert.equal(listView.contentHeight, 500); // 10 * 50
+});
+
+test('ListView rebuilds when model changes', () => {
+  const { ListModel, ListView, Component, Item, Context } = require('../src/runtime');
+
+  const model = new ListModel({ rows: [{ n: 1 }, { n: 2 }] });
+  const listView = new ListView();
+  listView.width = 200;
+  listView.height = 200;
+  listView._delegateHeight = 40;
+  listView.setContext(new Context(null, {}));
+
+  const delegate = new Component(({ parent: p }) => {
+    const item = new Item({ parentItem: p });
+    item.height = 40;
+    return item;
+  });
+
+  listView.model = model;
+  listView.delegate = delegate;
+
+  const before = listView.createdCount;
+
+  model.append({ n: 3 });
+  model.append({ n: 4 });
+
+  // After appending, rebuild should have been triggered
+  assert.ok(listView.contentHeight >= 40 * 4, 'contentHeight should cover 4 rows');
+});

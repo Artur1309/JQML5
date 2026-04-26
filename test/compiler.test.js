@@ -154,3 +154,89 @@ Item {
   const js = fs.readFileSync(path.join(outdir, 'app.js'), 'utf8');
   assert.match(js, /__jqmlRoot/);
 });
+
+test('Stage B: compiler handles ListModel with ListElement children', async () => {
+  const fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), 'jqmlc-stageB-'));
+  const outdir = fs.mkdtempSync(path.join(os.tmpdir(), 'jqmlc-stageB-dist-'));
+
+  fs.writeFileSync(path.join(fixtureDir, 'Main.qml'), `
+import QtQuick 2.15
+Item {
+  id: root
+  width: 400
+  height: 300
+
+  ListModel {
+    id: myModel
+    ListElement { name: "Alice"; age: 30 }
+    ListElement { name: "Bob";   age: 25 }
+    ListElement { name: "Carol"; age: 35 }
+  }
+
+  ListView {
+    x: 0
+    y: 0
+    width: 400
+    height: 300
+    model: myModel
+    delegate: Rectangle {
+      width: 400
+      height: 40
+      color: "#ffffff"
+    }
+  }
+}
+`, 'utf8');
+
+  const result = await compileQmlApplication({
+    entryFile: path.join(fixtureDir, 'Main.qml'),
+    outdir,
+  });
+
+  assert.equal(result.componentCount >= 1, true);
+  assert.equal(fs.existsSync(path.join(outdir, 'app.js')), true);
+
+  const js = fs.readFileSync(path.join(outdir, 'app.js'), 'utf8');
+  assert.match(js, /ListModel/);
+  assert.match(js, /ListView/);
+  assert.match(js, /ListElement/);
+});
+
+test('Stage B: compiler handles Repeater with delegate', async () => {
+  const fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), 'jqmlc-repeater-'));
+  const outdir = fs.mkdtempSync(path.join(os.tmpdir(), 'jqmlc-repeater-dist-'));
+
+  fs.writeFileSync(path.join(fixtureDir, 'Main.qml'), `
+import QtQuick 2.15
+Item {
+  id: root
+  width: 300
+  height: 200
+
+  ListModel {
+    id: items
+    ListElement { label: "One" }
+    ListElement { label: "Two" }
+  }
+
+  Repeater {
+    model: items
+    delegate: Rectangle {
+      width: 100
+      height: 30
+      color: "#eeeeee"
+    }
+  }
+}
+`, 'utf8');
+
+  const result = await compileQmlApplication({
+    entryFile: path.join(fixtureDir, 'Main.qml'),
+    outdir,
+  });
+
+  assert.equal(result.componentCount >= 1, true);
+  const js = fs.readFileSync(path.join(outdir, 'app.js'), 'utf8');
+  assert.match(js, /Repeater/);
+  assert.match(js, /ListModel/);
+});
