@@ -118,7 +118,11 @@ function createDefaultRegistries() {
   modules.registerModule('QtQuick.Controls', {
     listTypes: () => ['Button', 'Label', 'TextField', 'Slider', 'CheckBox'],
   });
-  // QtQuick.Layouts
+  // QtQuick.Layouts – exposes RowLayout, ColumnLayout, GridLayout.
+  // Layout.* attached properties (fillWidth, fillHeight, preferredWidth/Height,
+  // minimumWidth/Height, maximumWidth/Height, alignment, margins, row, column,
+  // rowSpan, columnSpan) are stored in object.__layoutAttached by the codegen
+  // property loop and are read at runtime by these layout container classes.
   modules.registerModule('QtQuick.Layouts', {
     listTypes: () => ['RowLayout', 'ColumnLayout', 'GridLayout'],
   });

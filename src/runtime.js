@@ -4906,6 +4906,9 @@ class Flow extends Positioner {
 // QtQuick.Layouts: RowLayout, ColumnLayout, GridLayout
 // ---------------------------------------------------------------------------
 
+/** Floating-point epsilon used when comparing clamped fill sizes. */
+const _FILL_EPSILON = 0.001;
+
 /**
  * LayoutContainer – base class for RowLayout, ColumnLayout, GridLayout.
  *
@@ -5009,7 +5012,7 @@ class LayoutContainer extends Item {
       const uncapped = [];
       for (const d of toFill) {
         const clamped = Math.max(d.minSize, Math.min(d.maxSize, share));
-        if (clamped < share - 0.001) {
+        if (clamped < share - _FILL_EPSILON) {
           capped.push(d);
           d.allocSize = clamped;
         } else {
