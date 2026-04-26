@@ -525,6 +525,14 @@ const __ENUM_TABLE = {
   'ScrollBar.AsNeeded':  'ScrollBarAsNeeded',
   'ScrollBar.AlwaysOff': 'ScrollBarAlwaysOff',
   'ScrollBar.AlwaysOn':  'ScrollBarAlwaysOn',
+  // Popup closePolicy constants
+  'Popup.NoAutoClose':         0,
+  'Popup.CloseOnEscape':       1,
+  'Popup.CloseOnPressOutside': 2,
+  // Dialog standardButtons constants
+  'Dialog.NoButton': 0,
+  'Dialog.Ok':       1,
+  'Dialog.Cancel':   2,
 };
 const __exprCache = new Map();
 function __compileExpression(code) {

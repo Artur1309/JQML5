@@ -99,6 +99,12 @@ const RUNTIME_TYPES = [
   ['ApplicationWindow', { kind: 'runtime', runtimeExport: 'ApplicationWindow', category: 'controls', isItem: true }],
   ['Page', { kind: 'runtime', runtimeExport: 'Page', category: 'controls', isItem: true }],
   ['StackView', { kind: 'runtime', runtimeExport: 'StackView', category: 'controls', isItem: true }],
+  // Stage I: popups / menus / dialogs
+  ['Popup', { kind: 'runtime', runtimeExport: 'Popup', category: 'controls', isItem: true }],
+  ['Dialog', { kind: 'runtime', runtimeExport: 'Dialog', category: 'controls', isItem: true }],
+  ['MenuItem', { kind: 'runtime', runtimeExport: 'MenuItem', category: 'controls', isItem: true }],
+  ['Menu', { kind: 'runtime', runtimeExport: 'Menu', category: 'controls', isItem: true }],
+  ['Overlay', { kind: 'runtime', runtimeExport: 'Overlay', category: 'controls', isItem: true }],
   // Stage E: rendering improvements
   ['Image', { kind: 'runtime', runtimeExport: 'Image', category: 'quick', isItem: true }],
   // Stage D: grouped property block pseudo-types (lowercase; expanded inline in codegen)
@@ -132,6 +138,7 @@ function createDefaultRegistries() {
     listTypes: () => [
       'Button', 'Label', 'TextField', 'Slider', 'CheckBox',
       'ScrollBar', 'ScrollView', 'ApplicationWindow', 'Page', 'StackView',
+      'Popup', 'Dialog', 'MenuItem', 'Menu', 'Overlay',
     ],
   });
   // QtQuick.Layouts – exposes RowLayout, ColumnLayout, GridLayout.

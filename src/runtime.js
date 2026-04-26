@@ -2795,6 +2795,28 @@ class Scene {
       return null;
     }
 
+    // Stage I: collect open popups and handle modal blocking / CloseOnPressOutside
+    if (type === 'down') {
+      const openPopups = this._collectOpenPopups();
+      if (openPopups.length > 0) {
+        // Handle topmost popup first (highest z)
+        const topPopup = openPopups[openPopups.length - 1];
+        const insidePopup = topPopup.containsScenePoint(sceneX, sceneY);
+
+        if (!insidePopup) {
+          // CloseOnPressOutside: close the popup
+          if (topPopup.closePolicy & Popup.CloseOnPressOutside) {
+            topPopup.close();
+            this.renderer.markDirty();
+          }
+          // Modal: block the event from reaching items behind
+          if (topPopup.modal) {
+            return null;
+          }
+        }
+      }
+    }
+
     let target = null;
 
     if (type === 'move' && this._pressedTarget) {
@@ -2859,6 +2881,18 @@ class Scene {
     }
 
     return event;
+  }
+
+  // Stage I: collect all visible Popup instances from the item tree, sorted by z ascending
+  _collectOpenPopups(item = this.rootItem, result = []) {
+    if (!(item instanceof Item) || !item.visible) return result;
+    if (item instanceof Popup) result.push(item);
+    for (const child of item.childItems) {
+      this._collectOpenPopups(child, result);
+    }
+    // Sort by z ascending so last element is topmost
+    result.sort((a, b) => (a.z || 0) - (b.z || 0));
+    return result;
   }
 
   // Stage C: Focus management
@@ -2926,6 +2960,19 @@ class Scene {
 
   // Stage C: Keyboard event dispatch
   dispatchKey(type, originalEvent) {
+    // Stage I: handle Escape for open popups before normal key dispatch
+    if (type === 'pressed' && originalEvent.key === 'Escape') {
+      const openPopups = this._collectOpenPopups();
+      if (openPopups.length > 0) {
+        const topPopup = openPopups[openPopups.length - 1];
+        if (topPopup.closePolicy & Popup.CloseOnEscape) {
+          topPopup.close();
+          this.renderer.markDirty();
+          return { type, key: 'Escape', accepted: true };
+        }
+      }
+    }
+
     const focusItem = this.activeFocusItem;
     if (!(focusItem instanceof Item)) {
       return null;
@@ -7053,6 +7100,542 @@ class StackView extends Item {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Stage I: Popup – base class for floating overlay panels
+// ---------------------------------------------------------------------------
+
+/**
+ * Popup is the base class for Dialog, Menu and other floating panels.
+ *
+ * closePolicy is a bitmask:
+ *   Popup.NoAutoClose        = 0  – never auto-close
+ *   Popup.CloseOnEscape      = 1  – close when Escape is pressed
+ *   Popup.CloseOnPressOutside = 2  – close when pointer presses outside bounds
+ *
+ * Default: CloseOnEscape | CloseOnPressOutside = 3.
+ */
+class Popup extends Item {
+  constructor(options = {}) {
+    super(options);
+
+    // Popups default to hidden; use open() / close() to show/hide.
+    this._setPropertyValue('visible', options.visible !== undefined ? options.visible : false);
+
+    // Whether to block mouse events to items behind the popup.
+    this.defineProperty('modal',       options.modal       !== undefined ? options.modal       : false);
+    // Render a translucent dim overlay behind the popup when modal and dim.
+    this.defineProperty('dim',         options.dim         !== undefined ? options.dim         : true);
+    // closePolicy bitmask (see static constants).
+    this.defineProperty('closePolicy', options.closePolicy !== undefined ? options.closePolicy : Popup.CloseOnEscape | Popup.CloseOnPressOutside);
+    // Background fill colour of the popup panel.
+    this.defineProperty('background',  options.background  !== undefined ? options.background  : '#ffffff');
+    // Default padding around the content area.
+    this.defineProperty('padding',     options.padding     !== undefined ? options.padding     : 0);
+
+    this.defineSignal('opened');
+    this.defineSignal('closed');
+
+    // Render on top by default.
+    if (options.z === undefined) {
+      this.z = 1000;
+    }
+
+    // Implicit size – callers should set width/height explicitly.
+    this.implicitWidth  = options.width  || 300;
+    this.implicitHeight = options.height || 200;
+  }
+
+  /** Show the popup. */
+  open() {
+    if (!this.visible) {
+      this._setPropertyValue('visible', true);
+      this.opened.emit();
+    }
+  }
+
+  /** Hide the popup. */
+  close() {
+    if (this.visible) {
+      this._setPropertyValue('visible', false);
+      this.closed.emit();
+    }
+  }
+
+  draw(context) {
+    const w = this.width  || this.implicitWidth  || 300;
+    const h = this.height || this.implicitHeight || 200;
+    if (w <= 0 || h <= 0) return;
+
+    // When modal+dim, paint a full-scene translucent overlay behind this panel.
+    // We walk up to find the scene (root item) dimensions.
+    if (this.modal && this.dim) {
+      const root = this._sceneRoot();
+      if (root) {
+        const rw = root.width || root.implicitWidth || 0;
+        const rh = root.height || root.implicitHeight || 0;
+        if (rw > 0 && rh > 0) {
+          // Translate back to root coords
+          const sx = this._sceneOffsetX();
+          const sy = this._sceneOffsetY();
+          context.save();
+          context.translate(-sx, -sy);
+          context.fillStyle = 'rgba(0,0,0,0.4)';
+          context.fillRect(0, 0, rw, rh);
+          context.restore();
+        }
+      }
+    }
+
+    // Panel background
+    const radius = 8;
+    context.fillStyle = this.background || '#ffffff';
+    _ctrlRoundRect(context, 0, 0, w, h, radius);
+    context.fill();
+
+    // Drop shadow
+    context.shadowColor   = 'rgba(0,0,0,0.25)';
+    context.shadowBlur    = 12;
+    context.shadowOffsetX = 0;
+    context.shadowOffsetY = 4;
+    _ctrlRoundRect(context, 0, 0, w, h, radius);
+    context.fill();
+    context.shadowColor = 'transparent';
+    context.shadowBlur  = 0;
+  }
+
+  // ── Helpers ─────────────────────────────────────────────────────────────────
+
+  _sceneRoot() {
+    let p = this.parentItem || this;
+    while (p && p.parentItem) p = p.parentItem;
+    return p;
+  }
+
+  _sceneOffsetX() {
+    let x = this.x || 0;
+    let p = this.parentItem;
+    while (p) { x += (p.x || 0); p = p.parentItem; }
+    return x;
+  }
+
+  _sceneOffsetY() {
+    let y = this.y || 0;
+    let p = this.parentItem;
+    while (p) { y += (p.y || 0); p = p.parentItem; }
+    return y;
+  }
+
+  /** Returns true if scene coordinate (sx, sy) is inside this popup's bounds. */
+  containsScenePoint(sx, sy) {
+    const px = this._sceneOffsetX();
+    const py = this._sceneOffsetY();
+    const w  = this.width  || this.implicitWidth  || 0;
+    const h  = this.height || this.implicitHeight || 0;
+    return sx >= px && sx <= px + w && sy >= py && sy <= py + h;
+  }
+}
+
+// Static closePolicy constants
+Popup.NoAutoClose         = 0;
+Popup.CloseOnEscape       = 1;
+Popup.CloseOnPressOutside = 2;
+
+// ---------------------------------------------------------------------------
+// Stage I: Dialog – modal dialog with title and standard buttons
+// ---------------------------------------------------------------------------
+
+class Dialog extends Popup {
+  constructor(options = {}) {
+    super({
+      modal:      true,
+      dim:        true,
+      background: '#ffffff',
+      padding:    16,
+      ...options,
+    });
+
+    this.defineProperty('title',          options.title          ?? '');
+    // Bitmask: Dialog.Ok=1, Dialog.Cancel=2, Dialog.NoButton=0
+    this.defineProperty('standardButtons', options.standardButtons !== undefined ? options.standardButtons : Dialog.Ok | Dialog.Cancel);
+
+    this.defineSignal('accepted');
+    this.defineSignal('rejected');
+
+    this.implicitWidth  = options.width  || 360;
+    this.implicitHeight = options.height || 180;
+  }
+
+  draw(context) {
+    // Draw the base popup panel (includes dim overlay when modal).
+    super.draw(context);
+
+    const w = this.width  || this.implicitWidth  || 360;
+    const h = this.height || this.implicitHeight || 180;
+    if (w <= 0 || h <= 0) return;
+
+    const p = Theme.palette;
+    const f = Theme.font;
+
+    // Title bar
+    const titleH = 40;
+    context.fillStyle = p.primary || '#1976d2';
+    _ctrlRoundRect(context, 0, 0, w, titleH, 8);
+    context.fill();
+    // Title text
+    if (this.title) {
+      context.font = `bold ${f.pixelSize || 14}px ${f.family || 'sans-serif'}`;
+      context.fillStyle = '#ffffff';
+      context.textBaseline = 'middle';
+      context.textAlign = 'left';
+      context.fillText(String(this.title), 12, titleH / 2);
+      context.textAlign = 'left';
+      context.textBaseline = 'top';
+    }
+
+    // Divider
+    context.strokeStyle = 'rgba(0,0,0,0.1)';
+    context.lineWidth = 1;
+    context.beginPath();
+    context.moveTo(0, titleH);
+    context.lineTo(w, titleH);
+    context.stroke();
+
+    // Standard buttons (drawn at the bottom)
+    const btnH = 36;
+    const btnW = 80;
+    const btnY = h - btnH - 12;
+    const btns = this._buttons();
+    let btnX = w - 12;
+    for (const btn of btns.slice().reverse()) {
+      btnX -= btnW;
+      const isOk     = btn.role === 'accept';
+      const hovered  = this[`_${btn.id}Hovered`] || false;
+      const pressed  = this[`_${btn.id}Pressed`] || false;
+
+      let bg;
+      if (isOk) {
+        bg = pressed ? (p.primaryPressed || '#1565c0') : hovered ? (p.primaryHover || '#1e88e5') : (p.primary || '#1976d2');
+      } else {
+        bg = pressed ? '#e0e0e0' : hovered ? '#f5f5f5' : '#eeeeee';
+      }
+
+      _ctrlRoundRect(context, btnX, btnY, btnW, btnH, 6);
+      context.fillStyle = bg;
+      context.fill();
+
+      context.font = `${f.pixelSize || 14}px ${f.family || 'sans-serif'}`;
+      context.fillStyle = isOk ? '#ffffff' : (p.text || '#212121');
+      context.textAlign = 'center';
+      context.textBaseline = 'middle';
+      context.fillText(btn.label, btnX + btnW / 2, btnY + btnH / 2);
+      context.textAlign = 'left';
+      context.textBaseline = 'top';
+
+      btnX -= 8; // gap between buttons
+    }
+  }
+
+  _buttons() {
+    const result = [];
+    const sb = this.standardButtons !== undefined ? this.standardButtons : (Dialog.Ok | Dialog.Cancel);
+    if (sb & Dialog.Ok)     result.push({ id: 'ok',     label: 'OK',     role: 'accept' });
+    if (sb & Dialog.Cancel) result.push({ id: 'cancel', label: 'Cancel', role: 'reject' });
+    return result;
+  }
+
+  handlePointerEvent(type, event) {
+    if (!this.visible || !this.enabled) return false;
+
+    const w = this.width  || this.implicitWidth  || 360;
+    const h = this.height || this.implicitHeight || 180;
+    const btnH = 36;
+    const btnW = 80;
+    const btnY = h - btnH - 12;
+    const btns = this._buttons();
+
+    // Convert scene coords to local
+    const lx = event.sceneX - this._sceneOffsetX();
+    const ly = event.sceneY - this._sceneOffsetY();
+
+    // Check if pointer is inside dialog bounds
+    if (lx < 0 || lx > w || ly < 0 || ly > h) return false;
+
+    // Check buttons
+    let btnX = w - 12;
+    for (const btn of btns.slice().reverse()) {
+      btnX -= btnW;
+      const inside = lx >= btnX && lx <= btnX + btnW && ly >= btnY && ly <= btnY + btnH;
+
+      if (type === 'down') {
+        this[`_${btn.id}Hovered`] = inside;
+        this[`_${btn.id}Pressed`] = inside;
+      } else if (type === 'move') {
+        this[`_${btn.id}Hovered`] = inside;
+      } else if (type === 'up') {
+        const wasPressed = this[`_${btn.id}Pressed`];
+        this[`_${btn.id}Pressed`] = false;
+        if (wasPressed && inside) {
+          if (btn.role === 'accept') {
+            this.accepted.emit();
+          } else {
+            this.rejected.emit();
+          }
+          this.close();
+        }
+      }
+      btnX -= 8;
+    }
+
+    return true; // consume event to prevent click-through
+  }
+}
+
+// Standard button bitmask constants
+Dialog.NoButton = 0;
+Dialog.Ok       = 1;
+Dialog.Cancel   = 2;
+
+// ---------------------------------------------------------------------------
+// Stage I: MenuItem – item in a Menu
+// ---------------------------------------------------------------------------
+
+class MenuItem extends Item {
+  constructor(options = {}) {
+    super(options);
+
+    this.defineProperty('text',    options.text    ?? '');
+    this.defineProperty('hovered', false);
+    this.defineProperty('checked', options.checked !== undefined ? options.checked : false);
+
+    // Apply enabled if provided (Item base already defines it defaulting to true)
+    if (options.enabled !== undefined) {
+      this.enabled = options.enabled;
+    }
+
+    this.defineSignal('triggered');
+
+    this.implicitWidth  = 160;
+    this.implicitHeight = 32;
+  }
+
+  handlePointerEvent(type, event) {
+    if (!this.enabled) return false;
+
+    const w = this.width  || this.implicitWidth  || 160;
+    const h = this.height || this.implicitHeight || 32;
+    const lx = event.sceneX - this._sceneX();
+    const ly = event.sceneY - this._sceneY();
+    const inside = lx >= 0 && lx <= w && ly >= 0 && ly <= h;
+
+    if (type === 'move') {
+      this._setPropertyValue('hovered', inside);
+      return inside;
+    }
+
+    if (type === 'down' && inside) {
+      return true;
+    }
+
+    if (type === 'up' && inside) {
+      this.triggered.emit();
+      // Close the parent Menu if present
+      let p = this.parentItem;
+      while (p) {
+        if (p instanceof Menu) { p.close(); break; }
+        p = p.parentItem;
+      }
+      return true;
+    }
+
+    return false;
+  }
+
+  draw(context) {
+    const w = this.width  || this.implicitWidth  || 160;
+    const h = this.height || this.implicitHeight || 32;
+    if (w <= 0 || h <= 0) return;
+
+    const hovered = this.hovered;
+    if (hovered) {
+      context.fillStyle = Theme.palette.primaryHover || '#e3f2fd';
+      context.fillRect(0, 0, w, h);
+    }
+
+    const f = Theme.font;
+    context.font = `${f.pixelSize || 14}px ${f.family || 'sans-serif'}`;
+    const color = this.enabled ? (Theme.palette.text || '#212121') : (Theme.palette.disabledText || '#9e9e9e');
+    context.fillStyle = color;
+    context.textBaseline = 'middle';
+    context.textAlign = 'left';
+    context.fillText(String(this.text ?? ''), 12, h / 2);
+    context.textAlign = 'left';
+    context.textBaseline = 'top';
+  }
+
+  // Helper: scene X of this item
+  _sceneX() {
+    let x = this.x || 0;
+    let p = this.parentItem;
+    while (p) { x += (p.x || 0); p = p.parentItem; }
+    return x;
+  }
+
+  _sceneY() {
+    let y = this.y || 0;
+    let p = this.parentItem;
+    while (p) { y += (p.y || 0); p = p.parentItem; }
+    return y;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Stage I: Menu – popup containing a column of MenuItems
+// ---------------------------------------------------------------------------
+
+class Menu extends Popup {
+  constructor(options = {}) {
+    super({
+      modal:      false,
+      dim:        false,
+      closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside,
+      background: '#ffffff',
+      padding:    4,
+      ...options,
+    });
+
+    this.implicitWidth  = options.width  || 160;
+    this.implicitHeight = options.height || 8; // grows with items
+
+    // Watch child changes to re-layout
+    this._menuLayoutPending = false;
+  }
+
+  // Override parentItem setter to re-layout when items are added
+  _onChildItemAdded(child) {
+    this._relayoutMenu();
+  }
+
+  _relayoutMenu() {
+    const padding = this.padding || 4;
+    const itemH   = 32;
+    let y = padding;
+    let maxW = this.implicitWidth || 160;
+
+    for (const child of this.childItems) {
+      if (child instanceof MenuItem) {
+        child.x = 0;
+        child.y = y;
+        child.width  = this.width  || this.implicitWidth  || maxW;
+        child.height = itemH;
+        y += itemH;
+      }
+    }
+
+    const totalH = y + padding;
+    this.implicitHeight = totalH;
+    if (!this.height || this.height < totalH) {
+      this._setPropertyValue('height', totalH);
+    }
+  }
+
+  draw(context) {
+    // Re-layout items before drawing to ensure correct positions.
+    this._relayoutMenu();
+
+    const w = this.width  || this.implicitWidth  || 160;
+    const h = this.height || this.implicitHeight || 8;
+    if (w <= 0 || h <= 0) return;
+
+    // Menu panel background with shadow
+    const radius = 4;
+    context.shadowColor   = 'rgba(0,0,0,0.2)';
+    context.shadowBlur    = 8;
+    context.shadowOffsetX = 0;
+    context.shadowOffsetY = 2;
+    context.fillStyle = this.background || '#ffffff';
+    _ctrlRoundRect(context, 0, 0, w, h, radius);
+    context.fill();
+    context.shadowColor = 'transparent';
+    context.shadowBlur  = 0;
+
+    // Thin border
+    context.strokeStyle = 'rgba(0,0,0,0.12)';
+    context.lineWidth   = 1;
+    _ctrlRoundRect(context, 0.5, 0.5, w - 1, h - 1, radius);
+    context.stroke();
+  }
+
+  handlePointerEvent(type, event) {
+    if (!this.visible || !this.enabled) return false;
+
+    // Delegate to child MenuItems first
+    for (const child of this.childItems) {
+      if (child instanceof MenuItem && typeof child.handlePointerEvent === 'function') {
+        if (child.handlePointerEvent(type, event)) return true;
+      }
+    }
+
+    // Consume any event that hits the menu panel itself to prevent click-through
+    if (this.containsScenePoint(event.sceneX, event.sceneY)) return true;
+    return false;
+  }
+
+  // When the menu is opened/closed, update children widths to match menu width.
+  open() {
+    this._relayoutMenu();
+    super.open();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Stage I: Overlay – lightweight singleton-like overlay descriptor
+// (matches Qt's ApplicationWindow.overlay attached property concept)
+// ---------------------------------------------------------------------------
+
+class Overlay extends Item {
+  constructor(options = {}) {
+    super(options);
+    this.defineProperty('color', options.color ?? 'rgba(0,0,0,0.4)');
+    this.z = 999; // just below popups
+    this._setPropertyValue('visible', false);
+  }
+
+  draw(context) {
+    const root = this._sceneRoot();
+    if (!root) return;
+    const w = root.width || root.implicitWidth || 0;
+    const h = root.height || root.implicitHeight || 0;
+    if (w <= 0 || h <= 0) return;
+    const sx = this._sceneOffsetX();
+    const sy = this._sceneOffsetY();
+    context.save();
+    context.translate(-sx, -sy);
+    context.fillStyle = this.color || 'rgba(0,0,0,0.4)';
+    context.fillRect(0, 0, w, h);
+    context.restore();
+  }
+
+  _sceneRoot() {
+    let p = this.parentItem || this;
+    while (p && p.parentItem) p = p.parentItem;
+    return p;
+  }
+
+  _sceneOffsetX() {
+    let x = this.x || 0;
+    let p = this.parentItem;
+    while (p) { x += (p.x || 0); p = p.parentItem; }
+    return x;
+  }
+
+  _sceneOffsetY() {
+    let y = this.y || 0;
+    let p = this.parentItem;
+    while (p) { y += (p.y || 0); p = p.parentItem; }
+    return y;
+  }
+}
+
 const runtimeExports = {
   Signal,
   Binding,
@@ -7122,6 +7705,12 @@ const runtimeExports = {
   ApplicationWindow,
   Page,
   StackView,
+  // Stage I: popups / menus / dialogs
+  Popup,
+  Dialog,
+  MenuItem,
+  Menu,
+  Overlay,
 };
 
 if (typeof module !== 'undefined' && module.exports) {

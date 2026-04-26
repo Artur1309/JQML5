@@ -4342,3 +4342,241 @@ test('DragHandler activates when move exceeds grab threshold', () => {
   scene.dispatchPointer('move', 60, 60);
   assert.equal(handler.active, true, 'should activate after exceeding threshold');
 });
+
+// =============================================================================
+// Stage I: Popup / Dialog / Menu / MenuItem tests
+// =============================================================================
+
+test('Popup defaults to hidden', () => {
+  const { Popup } = require('../src/runtime');
+  const p = new Popup();
+  assert.equal(p.visible, false);
+});
+
+test('Popup.open() makes popup visible and emits opened', () => {
+  const { Popup } = require('../src/runtime');
+  const p = new Popup();
+  const events = [];
+  p.opened.connect(() => events.push('opened'));
+  p.open();
+  assert.equal(p.visible, true);
+  assert.deepEqual(events, ['opened']);
+});
+
+test('Popup.close() hides popup and emits closed', () => {
+  const { Popup } = require('../src/runtime');
+  const p = new Popup();
+  const events = [];
+  p.closed.connect(() => events.push('closed'));
+  p.open();
+  p.close();
+  assert.equal(p.visible, false);
+  assert.deepEqual(events, ['closed']);
+});
+
+test('Popup.open() is idempotent (does not emit opened twice)', () => {
+  const { Popup } = require('../src/runtime');
+  const p = new Popup();
+  let count = 0;
+  p.opened.connect(() => count++);
+  p.open();
+  p.open(); // second call should be a no-op
+  assert.equal(count, 1);
+});
+
+test('Popup has default high z-order', () => {
+  const { Popup } = require('../src/runtime');
+  const p = new Popup();
+  assert.equal(p.z, 1000);
+});
+
+test('Popup CloseOnEscape constant equals 1', () => {
+  const { Popup } = require('../src/runtime');
+  assert.equal(Popup.CloseOnEscape, 1);
+});
+
+test('Popup CloseOnPressOutside constant equals 2', () => {
+  const { Popup } = require('../src/runtime');
+  assert.equal(Popup.CloseOnPressOutside, 2);
+});
+
+test('Popup NoAutoClose constant equals 0', () => {
+  const { Popup } = require('../src/runtime');
+  assert.equal(Popup.NoAutoClose, 0);
+});
+
+test('Scene.dispatchKey Escape closes popup with CloseOnEscape policy', () => {
+  const { Item, Popup, Scene } = require('../src/runtime');
+
+  const root = new Item();
+  root.width = 400; root.height = 400;
+
+  const popup = new Popup({ parentItem: root, closePolicy: Popup.CloseOnEscape });
+  popup.width = 200; popup.height = 200;
+  popup.open();
+
+  const scene = new Scene({ rootItem: root });
+  // Give the scene a focusable item so dispatchKey doesn't bail early
+  const btn = new Item({ parentItem: root });
+  btn.activeFocusOnTab = true;
+  btn.focusable = true;
+  scene.forceActiveFocus(btn);
+
+  assert.equal(popup.visible, true);
+  scene.dispatchKey('pressed', { key: 'Escape', code: 'Escape', ctrlKey: false, altKey: false, shiftKey: false, metaKey: false });
+  assert.equal(popup.visible, false);
+});
+
+test('Scene.dispatchKey Escape does NOT close popup with NoAutoClose policy', () => {
+  const { Item, Popup, Scene } = require('../src/runtime');
+
+  const root = new Item();
+  root.width = 400; root.height = 400;
+
+  const popup = new Popup({ parentItem: root, closePolicy: Popup.NoAutoClose });
+  popup.width = 200; popup.height = 200;
+  popup.open();
+
+  const scene = new Scene({ rootItem: root });
+  const btn = new Item({ parentItem: root });
+  btn.activeFocusOnTab = true;
+  btn.focusable = true;
+  scene.forceActiveFocus(btn);
+
+  scene.dispatchKey('pressed', { key: 'Escape', code: 'Escape', ctrlKey: false, altKey: false, shiftKey: false, metaKey: false });
+  assert.equal(popup.visible, true, 'popup should stay open with NoAutoClose');
+});
+
+test('Scene.dispatchPointer CloseOnPressOutside closes popup on outside click', () => {
+  const { Item, Popup, Scene } = require('../src/runtime');
+
+  const root = new Item();
+  root.width = 400; root.height = 400;
+
+  const popup = new Popup({ parentItem: root, closePolicy: Popup.CloseOnPressOutside });
+  popup.x = 100; popup.y = 100;
+  popup.width = 200; popup.height = 200;
+  popup.open();
+
+  const scene = new Scene({ rootItem: root });
+
+  // Click well outside the popup
+  scene.dispatchPointer('down', 10, 10);
+  assert.equal(popup.visible, false, 'popup should close on outside click');
+});
+
+test('modal popup blocks click-through to items behind', () => {
+  const { Item, Popup, Button, Scene } = require('../src/runtime');
+
+  const root = new Item();
+  root.width = 400; root.height = 400;
+
+  // Background button that should NOT be clicked when modal popup is open
+  const bgButton = new Button({ parentItem: root });
+  bgButton.x = 0; bgButton.y = 0;
+  bgButton.width = 400; bgButton.height = 400;
+  bgButton.text = 'Background';
+
+  let bgClicked = false;
+  bgButton.clicked.connect(() => { bgClicked = true; });
+
+  const popup = new Popup({ parentItem: root, modal: true });
+  popup.x = 100; popup.y = 100;
+  popup.width = 200; popup.height = 200;
+  // modal popup with no auto-close so it stays open
+  popup.closePolicy = Popup.NoAutoClose;
+  popup.open();
+
+  const scene = new Scene({ rootItem: root });
+
+  // Click outside the popup, inside the background button
+  scene.dispatchPointer('down', 10, 10);
+  scene.dispatchPointer('up', 10, 10);
+  assert.equal(bgClicked, false, 'modal popup should block clicks to items behind');
+});
+
+test('Dialog has accepted and rejected signals', () => {
+  const { Dialog } = require('../src/runtime');
+  const d = new Dialog({ title: 'Test' });
+  assert.ok(typeof d.accepted.connect === 'function');
+  assert.ok(typeof d.rejected.connect === 'function');
+});
+
+test('Dialog defaults to modal', () => {
+  const { Dialog } = require('../src/runtime');
+  const d = new Dialog();
+  assert.equal(d.modal, true);
+});
+
+test('Dialog standardButton constants', () => {
+  const { Dialog } = require('../src/runtime');
+  assert.equal(Dialog.Ok,       1);
+  assert.equal(Dialog.Cancel,   2);
+  assert.equal(Dialog.NoButton, 0);
+});
+
+test('MenuItem triggered signal fires on click', () => {
+  const { Item, MenuItem, Scene } = require('../src/runtime');
+
+  const root = new Item();
+  root.width = 200; root.height = 200;
+
+  const mi = new MenuItem({ parentItem: root, text: 'Copy' });
+  mi.x = 0; mi.y = 0;
+  mi.width = 200; mi.height = 32;
+
+  let triggered = false;
+  mi.triggered.connect(() => { triggered = true; });
+
+  const scene = new Scene({ rootItem: root });
+  scene.dispatchPointer('down', 100, 16);
+  scene.dispatchPointer('up', 100, 16);
+
+  assert.equal(triggered, true, 'MenuItem triggered should fire on click');
+});
+
+test('MenuItem triggered closes parent Menu', () => {
+  const { Item, Menu, MenuItem, Scene } = require('../src/runtime');
+
+  const root = new Item();
+  root.width = 400; root.height = 400;
+
+  const menu = new Menu({ parentItem: root });
+  menu.x = 0; menu.y = 0;
+  menu.width = 160;
+
+  const mi = new MenuItem({ parentItem: menu, text: 'Delete' });
+  mi.width = 160; mi.height = 32;
+
+  menu.open();
+  assert.equal(menu.visible, true);
+
+  const scene = new Scene({ rootItem: root });
+  // Click on the menu item (Menu renders at y=0, MenuItem at y=4 because of padding)
+  scene.dispatchPointer('down', 80, 20);
+  scene.dispatchPointer('up', 80, 20);
+
+  assert.equal(menu.visible, false, 'Menu should close after MenuItem is triggered');
+});
+
+test('Menu defaults to non-modal', () => {
+  const { Menu } = require('../src/runtime');
+  const m = new Menu();
+  assert.equal(m.modal, false);
+});
+
+test('Popup containsScenePoint returns correct values', () => {
+  const { Item, Popup } = require('../src/runtime');
+
+  const root = new Item();
+  root.width = 400; root.height = 400;
+
+  const popup = new Popup({ parentItem: root });
+  popup.x = 100; popup.y = 100;
+  popup.width = 200; popup.height = 200;
+
+  assert.equal(popup.containsScenePoint(150, 150), true,  'inside should return true');
+  assert.equal(popup.containsScenePoint(50,  50),  false, 'outside should return false');
+  assert.equal(popup.containsScenePoint(300, 300), true,  'exactly on edge should return true');
+  assert.equal(popup.containsScenePoint(301, 301), false, 'just outside edge should return false');
+});
