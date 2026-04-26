@@ -694,6 +694,23 @@ function _normalizeVAlign(v) {
   return 'top';
 }
 
+/**
+ * Build a CSS font string from a font descriptor object.
+ * Shared by Text, TextInput and any other item that renders text.
+ *   @param {object} font - { family, pixelSize, bold, italic }
+ */
+function _buildFontString(font) {
+  const f = font || {};
+  const size = f.pixelSize || 14;
+  const family = f.family || 'sans-serif';
+  const bold = f.bold ? 'bold ' : '';
+  const italic = f.italic ? 'italic ' : '';
+  return `${italic}${bold}${size}px ${family}`;
+}
+
+/** Default blink interval (ms) for cursor in TextInput / TextField. */
+const _CURSOR_BLINK_INTERVAL = 500;
+
 // ---------------------------------------------------------------------------
 // Stage E: Image asset cache
 // ---------------------------------------------------------------------------
@@ -2854,12 +2871,7 @@ class Text extends Item {
 
   /** Build a CSS font string from this item's font property. */
   _fontString() {
-    const font = this.font || {};
-    const size = font.pixelSize || 14;
-    const family = font.family || 'sans-serif';
-    const bold = font.bold ? 'bold ' : '';
-    const italic = font.italic ? 'italic ' : '';
-    return `${italic}${bold}${size}px ${family}`;
+    return _buildFontString(this.font);
   }
 
   /**
@@ -4365,7 +4377,7 @@ class TextInput extends Item {
     this._cursorBlinkTimer = null;
     this._anchorPos = 0;
     // Blink interval; 0 disables blinking (useful for deterministic tests).
-    this._blinkInterval = options.blinkInterval !== undefined ? options.blinkInterval : 500;
+    this._blinkInterval = options.blinkInterval !== undefined ? options.blinkInterval : _CURSOR_BLINK_INTERVAL;
 
     // Keyboard handler
     this._keys = new Keys();
@@ -4391,12 +4403,7 @@ class TextInput extends Item {
   }
 
   _fontString() {
-    const font = this.font || {};
-    const size = font.pixelSize || 14;
-    const family = font.family || 'sans-serif';
-    const bold = font.bold ? 'bold ' : '';
-    const italic = font.italic ? 'italic ' : '';
-    return `${italic}${bold}${size}px ${family}`;
+    return _buildFontString(this.font);
   }
 
   /** Returns the display text, applying echoMode (e.g. Password → bullets). */
@@ -4651,7 +4658,7 @@ class TextField extends Item {
     // Internal TextInput carries all editing logic (cursor, selection, blink).
     this._textInput = new TextInput({
       text: options.text ?? '',
-      blinkInterval: options.blinkInterval !== undefined ? options.blinkInterval : 500,
+      blinkInterval: options.blinkInterval !== undefined ? options.blinkInterval : _CURSOR_BLINK_INTERVAL,
     });
 
     // Keep this.text ↔ _textInput.text in sync (guard against cycles).
