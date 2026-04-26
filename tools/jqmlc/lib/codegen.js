@@ -449,7 +449,7 @@ const __ENUM_TABLE = {
   // Image fill modes
   'Image.Stretch':           'Stretch',
   'Image.PreserveAspectFit': 'PreserveAspectFit',
-  'Image.PreserveAspectCrop':'PreserveAspectCrop',
+  'Image.PreserveAspectCrop': 'PreserveAspectCrop',
   'Image.Pad':               'Pad',
   'Image.Tile':              'Tile',
   // Qt alignment helpers

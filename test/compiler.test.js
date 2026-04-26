@@ -732,16 +732,8 @@ Item {
 
   const bundleJs = fs.readFileSync(path.join(outdir, 'app.js'), 'utf8');
 
-  // Patch for Node environment (no window/canvas) and execute
-  const runtime = require('../src/runtime');
-  const patchedJs = bundleJs
-    .replace(/window\.addEventListener\([^)]*\)\s*\{[\s\S]*?\}\s*\)\s*;/, '')
-    .replace(/const __runtime = require\([^)]*\);/, '');
-
-  const mod = { exports: {} };
-  const fn = new Function('__runtime', 'module', 'exports', patchedJs + '\nmodule.exports = { __jqmlRoot: typeof __jqmlRoot !== "undefined" ? __jqmlRoot : null };');
-  // We just verify the bundle contains the onCompleted wiring; full execution
-  // requires a DOM environment.  Verify structural correctness by loading the module.
+  // We verify structural correctness: the bundle must wire up onCompleted.
+  // Full execution requires a DOM environment, so we only check the bundle content.
   assert.match(bundleJs, /onCompleted/);
   assert.match(bundleJs, /__ATTACHED_HANDLERS\["Component\.onCompleted"\]|__ATTACHED_HANDLERS\['Component\.onCompleted'\]|Component\.onCompleted/);
 });
@@ -809,23 +801,6 @@ Rectangle {
   });
 
   const bundleJs = fs.readFileSync(path.join(outdir, 'app.js'), 'utf8');
-
-  // Evaluate the generated bundle in a Node-compatible way
-  const runtime = require('../src/runtime');
-  // Strip DOM bootstrap and re-require runtime from module
-  const nodeJs = bundleJs
-    .replace(/window\.addEventListener[\s\S]*?^\}\);$/m, '')
-    .replace(/const __runtime = require\([^)]*\);/, `const __runtime = require(${JSON.stringify(require.resolve('../src/runtime'))});`);
-
-  let root;
-  try {
-    const fn = new Function('require', nodeJs + '\n__jqmlRoot_export = typeof __jqmlRoot !== "undefined" ? __jqmlRoot : null;');
-    let __jqmlRoot_export = null;
-    fn(require);
-    // If execution reaches here, the bundle loaded without error
-  } catch (_) {
-    // Expected: `window` is not defined in Node; just verify structural output
-  }
 
   // Key assertions: the flat property names must appear in the bundle
   assert.match(bundleJs, /borderColor/);
