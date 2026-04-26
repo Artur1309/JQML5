@@ -14,6 +14,7 @@ const {
   CanvasRenderer,
   Scene,
   Text,
+  TextInput,
   Image,
 } = require('../src/runtime');
 
@@ -2321,6 +2322,393 @@ test('Text.draw uses measurement cache for elide', () => {
   // The ellipsis character ('…') itself is a new cache key, but the base text is cached.
   // Net new calls must be fewer than on the first draw (which measured many substrings).
   assert.ok(newCalls < firstCallCount, `Second draw (${newCalls} new calls) should use cache more than first (${firstCallCount} calls)`);
+});
+
+// ---------------------------------------------------------------------------
+// Stage F: Text upgrade – multi-line layout, wrapMode, implicitSize
+// ---------------------------------------------------------------------------
+
+test('Text._getLines with WordWrap splits on word boundaries', () => {
+  const fakeCtx = {
+    font: '',
+    measureText: (str) => ({ width: str.length * 8 }),
+    fillText: () => {},
+    fillStyle: '',
+    textBaseline: '',
+  };
+
+  const t = new Text({
+    text: 'Hello World Foo',
+    font: { family: 'test', pixelSize: 14, bold: false },
+    wrapMode: 'WordWrap',
+  });
+  t.width = 48; // 6 chars * 8px = 48px per line maximum
+
+  const lines = t._getLines(fakeCtx);
+  // 'Hello' = 5*8=40 <=48, 'Hello World'=11*8=88 >48 → push 'Hello', cur='World'
+  // 'World' = 5*8=40 <=48, 'World Foo'=9*8=72 >48 → push 'World', cur='Foo'
+  // end → push 'Foo'
+  assert.equal(lines.length, 3, `Expected 3 lines, got ${lines.length}: ${JSON.stringify(lines)}`);
+  assert.equal(lines[0], 'Hello');
+  assert.equal(lines[1], 'World');
+  assert.equal(lines[2], 'Foo');
+});
+
+test('Text._measure computes implicitHeight from line count and pixelSize', () => {
+  const fakeCtx = {
+    font: '',
+    measureText: (str) => ({ width: str.length * 8 }),
+    fillText: () => {},
+    fillStyle: '',
+    textBaseline: '',
+  };
+
+  const t = new Text({
+    text: 'Hello World',
+    font: { family: 'test', pixelSize: 16, bold: false },
+    wrapMode: 'WordWrap',
+  });
+  t.width = 48; // fits 6 chars; 'Hello' and 'World' each fit, 'Hello World' doesn't
+
+  t._measure(fakeCtx);
+  // 2 lines * 16px = 32px
+  assert.equal(t.implicitHeight, 32);
+  // implicitWidth = max line width = 'Hello'.length * 8 = 5*8 = 40 or 'World' = 40
+  assert.equal(t.implicitWidth, 40);
+});
+
+test('Text._getLines with lineHeight multiplier affects implicitHeight', () => {
+  const fakeCtx = {
+    font: '',
+    measureText: (str) => ({ width: str.length * 8 }),
+    fillText: () => {},
+    fillStyle: '',
+    textBaseline: '',
+  };
+
+  const t = new Text({
+    text: 'Hello\nWorld',
+    font: { family: 'test', pixelSize: 10, bold: false },
+    lineHeight: 1.5,
+  });
+
+  t._measure(fakeCtx);
+  // 2 lines * 10px * 1.5 = 30px
+  assert.equal(t.implicitHeight, 30);
+});
+
+test('Text elide right truncates with ellipsis (NoWrap)', () => {
+  const fakeCtx = {
+    font: '',
+    measureText: (str) => ({ width: str.length * 8 }),
+    fillText: () => {},
+    fillStyle: '',
+    textBaseline: '',
+  };
+
+  const t = new Text({
+    text: 'Hello World',
+    font: { family: 'test', pixelSize: 12, bold: false },
+    elide: 'ElideRight',
+  });
+  t.width = 40; // fits 5 chars
+
+  const lines = t._getLines(fakeCtx);
+  assert.equal(lines.length, 1);
+  assert.ok(lines[0].endsWith('\u2026'), `Expected ellipsis, got "${lines[0]}"`);
+  // 'Hell\u2026' = 5 chars * 8 = 40 <= 40
+  assert.ok(lines[0].length <= 5, `Line should be short: "${lines[0]}"`);
+});
+
+test('Text maximumLineCount limits lines and applies elide', () => {
+  const fakeCtx = {
+    font: '',
+    measureText: (str) => ({ width: str.length * 8 }),
+    fillText: () => {},
+    fillStyle: '',
+    textBaseline: '',
+  };
+
+  const t = new Text({
+    text: 'Line1\nLine2\nLine3\nLine4',
+    font: { family: 'test', pixelSize: 12, bold: false },
+    maximumLineCount: 2,
+    elide: 'ElideRight',
+  });
+  t.width = 200; // wide enough for full text
+
+  const lines = t._getLines(fakeCtx);
+  assert.equal(lines.length, 2);
+  assert.ok(lines[1].endsWith('\u2026'), `Last line should have ellipsis: "${lines[1]}"`);
+});
+
+test('Text draws multiple lines with correct positions', () => {
+  const drawn = [];
+  const fakeCtx = {
+    font: '',
+    fillStyle: '',
+    textBaseline: '',
+    measureText: (str) => ({ width: str.length * 8 }),
+    fillText: (str, x, y) => { drawn.push({ str, x, y }); },
+  };
+
+  const t = new Text({
+    text: 'Hello\nWorld',
+    font: { family: 'test', pixelSize: 10, bold: false },
+  });
+
+  t.draw(fakeCtx);
+  assert.equal(drawn.length, 2);
+  assert.equal(drawn[0].str, 'Hello');
+  assert.equal(drawn[0].y, 0);
+  assert.equal(drawn[1].str, 'World');
+  assert.equal(drawn[1].y, 10); // pixelSize * lineHeight = 10 * 1.0
+});
+
+test('Text horizontal center alignment positions text at (w - textW) / 2', () => {
+  const drawn = [];
+  const fakeCtx = {
+    font: '',
+    fillStyle: '',
+    textBaseline: '',
+    measureText: (str) => ({ width: str.length * 8 }),
+    fillText: (str, x, y) => { drawn.push({ str, x }); },
+  };
+
+  const t = new Text({
+    text: 'Hi',
+    font: { family: 'test', pixelSize: 12, bold: false },
+    horizontalAlignment: 'center',
+  });
+  t.width = 100;
+
+  t.draw(fakeCtx);
+  // 'Hi' = 2*8 = 16px; center x = (100 - 16) / 2 = 42
+  assert.equal(drawn[0].x, 42);
+});
+
+test('Text vertical center alignment positions first line correctly', () => {
+  const drawn = [];
+  const fakeCtx = {
+    font: '',
+    fillStyle: '',
+    textBaseline: '',
+    measureText: (str) => ({ width: str.length * 8 }),
+    fillText: (str, x, y) => { drawn.push({ str, y }); },
+  };
+
+  const t = new Text({
+    text: 'Hi',
+    font: { family: 'test', pixelSize: 10, bold: false },
+    verticalAlignment: 'vcenter',
+  });
+  t.width = 100;
+  t.height = 50;
+
+  t.draw(fakeCtx);
+  // 1 line * 10px = 10px totalH; startY = (50 - 10) / 2 = 20
+  assert.equal(drawn[0].y, 20);
+});
+
+test('Text line cache is invalidated when text changes', () => {
+  const fakeCtx = {
+    font: '',
+    measureText: (str) => ({ width: str.length * 8 }),
+    fillText: () => {},
+    fillStyle: '',
+    textBaseline: '',
+  };
+
+  const t = new Text({
+    text: 'Hello',
+    font: { family: 'test', pixelSize: 10, bold: false },
+  });
+  t.width = 200;
+
+  const lines1 = t._getLines(fakeCtx);
+  assert.equal(lines1[0], 'Hello');
+
+  t.text = 'World'; // should invalidate cache
+  const lines2 = t._getLines(fakeCtx);
+  assert.equal(lines2[0], 'World');
+});
+
+// ---------------------------------------------------------------------------
+// Stage F: TextInput tests
+// ---------------------------------------------------------------------------
+
+test('TextInput typing appends characters and updates cursorPosition', () => {
+  const ti = new TextInput({ blinkInterval: 0 });
+
+  const textChanges = [];
+  ti.textChanged.connect((v) => textChanges.push(v));
+
+  ti._handleKeyInput({ key: 'H', accepted: false });
+  ti._handleKeyInput({ key: 'i', accepted: false });
+
+  assert.equal(ti.text, 'Hi');
+  assert.equal(ti.cursorPosition, 2);
+  assert.deepEqual(textChanges, ['H', 'Hi']);
+});
+
+test('TextInput Backspace removes character before cursor', () => {
+  const ti = new TextInput({ text: 'Hello', blinkInterval: 0 });
+
+  ti._handleKeyInput({ key: 'Backspace', accepted: false });
+  assert.equal(ti.text, 'Hell');
+  assert.equal(ti.cursorPosition, 4);
+});
+
+test('TextInput Delete removes character after cursor', () => {
+  const ti = new TextInput({ text: 'Hello', blinkInterval: 0 });
+  ti._setCursorPos(0, false); // cursor at start
+
+  ti._handleKeyInput({ key: 'Delete', accepted: false });
+  assert.equal(ti.text, 'ello');
+  assert.equal(ti.cursorPosition, 0);
+});
+
+test('TextInput ArrowLeft / ArrowRight move cursor', () => {
+  const ti = new TextInput({ text: 'abc', blinkInterval: 0 });
+  assert.equal(ti.cursorPosition, 3); // starts at end
+
+  ti._handleKeyInput({ key: 'ArrowLeft', accepted: false });
+  assert.equal(ti.cursorPosition, 2);
+
+  ti._handleKeyInput({ key: 'ArrowRight', accepted: false });
+  assert.equal(ti.cursorPosition, 3);
+});
+
+test('TextInput Home / End move cursor to start / end', () => {
+  const ti = new TextInput({ text: 'abcde', blinkInterval: 0 });
+  assert.equal(ti.cursorPosition, 5);
+
+  ti._handleKeyInput({ key: 'Home', accepted: false });
+  assert.equal(ti.cursorPosition, 0);
+
+  ti._handleKeyInput({ key: 'End', accepted: false });
+  assert.equal(ti.cursorPosition, 5);
+});
+
+test('TextInput Shift+ArrowRight extends selection', () => {
+  const ti = new TextInput({ text: 'Hello', blinkInterval: 0 });
+  ti._setCursorPos(0, false); // cursor at start
+
+  ti._handleKeyInput({ key: 'ArrowRight', shiftKey: true, accepted: false });
+  ti._handleKeyInput({ key: 'ArrowRight', shiftKey: true, accepted: false });
+  ti._handleKeyInput({ key: 'ArrowRight', shiftKey: true, accepted: false });
+
+  assert.equal(ti.cursorPosition, 3);
+  assert.equal(ti.selectionStart, 0);
+  assert.equal(ti.selectionEnd, 3);
+  assert.equal(ti.selectedText, 'Hel');
+});
+
+test('TextInput Ctrl+A selects all text', () => {
+  const ti = new TextInput({ text: 'Hello World', blinkInterval: 0 });
+  ti._setCursorPos(0, false);
+
+  ti._handleKeyInput({ key: 'a', ctrlKey: true, accepted: false });
+
+  assert.equal(ti.selectionStart, 0);
+  assert.equal(ti.selectionEnd, 11);
+  assert.equal(ti.selectedText, 'Hello World');
+});
+
+test('TextInput typing over selection replaces it', () => {
+  const ti = new TextInput({ text: 'Hello', blinkInterval: 0 });
+  ti._setCursorPos(0, false);
+  // Select 'Hell'
+  ti._handleKeyInput({ key: 'ArrowRight', shiftKey: true, accepted: false });
+  ti._handleKeyInput({ key: 'ArrowRight', shiftKey: true, accepted: false });
+  ti._handleKeyInput({ key: 'ArrowRight', shiftKey: true, accepted: false });
+  ti._handleKeyInput({ key: 'ArrowRight', shiftKey: true, accepted: false });
+
+  assert.equal(ti.selectedText, 'Hell');
+  ti._handleKeyInput({ key: 'X', accepted: false });
+  assert.equal(ti.text, 'Xo');
+  assert.equal(ti.cursorPosition, 1);
+});
+
+test('TextInput Enter emits accepted signal', () => {
+  const ti = new TextInput({ blinkInterval: 0 });
+  ti.text = 'search';
+
+  let acceptedCount = 0;
+  ti.signal('accepted').connect(() => { acceptedCount += 1; });
+
+  const event = { key: 'Enter', accepted: false };
+  ti._handleKeyInput(event);
+
+  assert.equal(acceptedCount, 1);
+  assert.equal(event.accepted, true);
+});
+
+test('TextInput readOnly ignores key input', () => {
+  const ti = new TextInput({ text: 'fixed', readOnly: true, blinkInterval: 0 });
+
+  ti._handleKeyInput({ key: 'X', accepted: false });
+  assert.equal(ti.text, 'fixed');
+});
+
+test('TextInput echoMode Password shows bullets', () => {
+  const ti = new TextInput({ text: 'abc', echoMode: 'Password', blinkInterval: 0 });
+  assert.equal(ti._displayText(), '\u2022\u2022\u2022');
+});
+
+test('TextInput editingFinished emits on focus loss', () => {
+  const root = new Item();
+  root.width = 200;
+  root.height = 100;
+
+  const ti = new TextInput({ parentItem: root, blinkInterval: 0 });
+  ti.width = 150;
+  ti.height = 28;
+
+  const scene = new Scene({ rootItem: root });
+  let finishedCount = 0;
+  ti.signal('editingFinished').connect(() => { finishedCount += 1; });
+
+  scene.forceActiveFocus(ti);
+  assert.equal(ti.activeFocus, true);
+  assert.equal(ti.cursorVisible, true);
+
+  scene.clearFocus();
+  assert.equal(ti.activeFocus, false);
+  assert.equal(finishedCount, 1);
+});
+
+test('TextInput draw renders text and selection highlight', () => {
+  const calls = [];
+  const fakeCtx = {
+    font: '',
+    fillStyle: '',
+    textBaseline: '',
+    strokeStyle: '',
+    lineWidth: 0,
+    measureText: (str) => ({ width: str.length * 8 }),
+    fillText: (str, x, y) => { calls.push({ op: 'fillText', str, x, y }); },
+    fillRect: (x, y, w, h) => { calls.push({ op: 'fillRect', x, y, w, h }); },
+    beginPath: () => {},
+    moveTo: () => {},
+    lineTo: () => {},
+    stroke: () => {},
+  };
+
+  const ti = new TextInput({ text: 'Hello', blinkInterval: 0 });
+  ti.width = 200;
+  ti.height = 28;
+  ti._setCursorPos(0, false);
+  // Select first 3 chars
+  ti._doUpdateSelection(0, 3);
+
+  ti.draw(fakeCtx);
+
+  const fillRects = calls.filter((c) => c.op === 'fillRect');
+  const fillTexts = calls.filter((c) => c.op === 'fillText');
+  assert.ok(fillRects.length > 0, 'Expected selection highlight rectangle');
+  assert.ok(fillTexts.length > 0, 'Expected text to be drawn');
+  assert.equal(fillTexts[0].str, 'Hello');
 });
 
 // ---------------------------------------------------------------------------
