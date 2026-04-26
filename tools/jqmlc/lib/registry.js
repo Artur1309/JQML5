@@ -66,6 +66,7 @@ const RUNTIME_TYPES = [
   ['ListElement', { kind: 'list-element', runtimeExport: 'ListElement', category: 'quick-model' }],
   ['ListModel', { kind: 'list-model', runtimeExport: 'ListModel', category: 'quick-model' }],
   ['Repeater', { kind: 'runtime', runtimeExport: 'Repeater', category: 'quick-model', isItem: true }],
+  ['Flickable', { kind: 'runtime', runtimeExport: 'Flickable', category: 'quick-model', isItem: true }],
   ['ListView', { kind: 'runtime', runtimeExport: 'ListView', category: 'quick-model', isItem: true }],
   // Stage C: focus / keys / pointer handlers
   ['Keys', { kind: 'runtime', runtimeExport: 'Keys', category: 'quick-input' }],
@@ -95,7 +96,7 @@ function createDefaultRegistries() {
       'Text', 'Image',
       'Animation', 'NumberAnimation', 'ColorAnimation', 'SequentialAnimation', 'ParallelAnimation',
       'PropertyChanges', 'State', 'Transition', 'Behavior',
-      'ListElement', 'ListModel', 'Repeater', 'ListView',
+      'ListElement', 'ListModel', 'Repeater', 'Flickable', 'ListView',
       'TapHandler', 'DragHandler',
     ],
   });
