@@ -5972,6 +5972,533 @@ class GridLayout extends LayoutContainer {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Stage G: ScrollBar – canvas-rendered scrollbar control (QtQuick.Controls 2)
+// ---------------------------------------------------------------------------
+
+class ScrollBar extends Item {
+  constructor(options = {}) {
+    super(options);
+
+    // 'Vertical' | 'Horizontal'  (also accept Qt.Vertical / Qt.Horizontal ints)
+    this.defineProperty('orientation', options.orientation ?? 'Vertical');
+    // Fractional size of the visible viewport relative to content (0..1)
+    this.defineProperty('size', options.size !== undefined ? options.size : 1.0);
+    // Fractional position of the viewport start relative to full content (0..1)
+    this.defineProperty('position', options.position !== undefined ? options.position : 0.0);
+    // Whether the bar is active (thumb is being dragged or mouse is over)
+    this.defineProperty('active', options.active !== undefined ? options.active : false);
+    // 'ScrollBarAsNeeded' | 'ScrollBarAlwaysOff' | 'ScrollBarAlwaysOn'
+    this.defineProperty('policy', options.policy ?? 'ScrollBarAsNeeded');
+    // Minimum thumb size as a fraction (0..1); prevents thumb from becoming too tiny
+    this.defineProperty('minimumSize', options.minimumSize !== undefined ? options.minimumSize : 0.05);
+
+    this.defineSignal('moved');
+    this.defineSignal('pressed');
+    this.defineSignal('released');
+
+    this.implicitWidth  = 8;
+    this.implicitHeight = 8;
+
+    // Internal drag state
+    this._sbDragActive = false;
+    this._sbDragStartPos = 0;      // pointer scene coord at drag start
+    this._sbDragStartPosition = 0; // this.position at drag start
+  }
+
+  // Returns true if the bar should be visible given policy + size
+  _shouldShow() {
+    const policy = this.policy || 'ScrollBarAsNeeded';
+    if (policy === 'ScrollBarAlwaysOff') return false;
+    if (policy === 'ScrollBarAlwaysOn')  return true;
+    // AsNeeded: hide when content fits viewport exactly
+    const sz = Math.max(0, Math.min(1, this.size ?? 1));
+    return sz < 1.0;
+  }
+
+  // Compute thumb rect in local coords
+  _thumbRect() {
+    const isV = this._isVertical();
+    const w = this.width  || this.implicitWidth  || 8;
+    const h = this.height || this.implicitHeight || 8;
+    const trackLen = isV ? h : w;
+    const sz  = Math.max(this.minimumSize ?? 0.05, Math.min(1, this.size ?? 1));
+    const pos = Math.max(0, Math.min(1 - sz, this.position ?? 0));
+    const thumbLen = sz * trackLen;
+    const thumbOff = pos * trackLen;
+    if (isV) {
+      return { x: 0, y: thumbOff, width: w, height: thumbLen };
+    } else {
+      return { x: thumbOff, y: 0, width: thumbLen, height: h };
+    }
+  }
+
+  _isVertical() {
+    const o = this.orientation;
+    // Accept int Qt enum values (2 = Qt.Vertical, 1 = Qt.Horizontal)
+    return o === 'Vertical' || o === 2 || o === 'Qt.Vertical';
+  }
+
+  draw(context) {
+    if (!this._shouldShow()) return;
+
+    const w = this.width  || this.implicitWidth  || 8;
+    const h = this.height || this.implicitHeight || 8;
+    if (w <= 0 || h <= 0) return;
+
+    // Track background
+    context.fillStyle = 'rgba(0,0,0,0.08)';
+    _ctrlRoundRect(context, 0, 0, w, h, Math.min(w, h) / 2);
+    context.fill();
+
+    // Thumb
+    const t = this._thumbRect();
+    const active = this._sbDragActive || (this.active ?? false);
+    context.fillStyle = active ? 'rgba(0,0,0,0.55)' : 'rgba(0,0,0,0.35)';
+    const r = Math.min(t.width, t.height) / 2;
+    _ctrlRoundRect(context, t.x, t.y, t.width, t.height, r);
+    context.fill();
+  }
+
+  handlePointerEvent(type, event) {
+    if (!this._shouldShow()) return false;
+    if (!this.enabled) return false;
+
+    const isV = this._isVertical();
+    const w = this.width  || this.implicitWidth  || 8;
+    const h = this.height || this.implicitHeight || 8;
+    const trackLen = isV ? h : w;
+
+    // Convert scene coordinates to local
+    const localX = (event.sceneX ?? 0) - this._sceneX();
+    const localY = (event.sceneY ?? 0) - this._sceneY();
+    const localCoord = isV ? localY : localX;
+
+    if (type === 'down') {
+      const t = this._thumbRect();
+      const thumbStart = isV ? t.y : t.x;
+      const thumbEnd   = thumbStart + (isV ? t.height : t.width);
+
+      // Click inside thumb → begin drag
+      if (localCoord >= thumbStart && localCoord <= thumbEnd) {
+        this._sbDragActive = true;
+        this._sbDragStartPos = localCoord;
+        this._sbDragStartPosition = this.position ?? 0;
+        this._setPropertyValue('active', true);
+        this.pressed.emit();
+        return true;
+      }
+
+      // Click outside thumb → jump position
+      const sz  = Math.max(this.minimumSize ?? 0.05, Math.min(1, this.size ?? 1));
+      const halfThumb = sz * trackLen / 2;
+      const newPos = Math.max(0, Math.min(1 - sz, (localCoord - halfThumb) / trackLen));
+      this.position = newPos;
+      this.moved.emit();
+      return true;
+    }
+
+    if (type === 'move' && this._sbDragActive) {
+      const sz  = Math.max(this.minimumSize ?? 0.05, Math.min(1, this.size ?? 1));
+      const delta = localCoord - this._sbDragStartPos;
+      const newPos = Math.max(0, Math.min(1 - sz, this._sbDragStartPosition + delta / trackLen));
+      this.position = newPos;
+      this.moved.emit();
+      return true;
+    }
+
+    if (type === 'up' && this._sbDragActive) {
+      this._sbDragActive = false;
+      this._setPropertyValue('active', false);
+      this.released.emit();
+      return true;
+    }
+
+    return false;
+  }
+
+  // Helper: scene X of this item (walk parent chain)
+  _sceneX() {
+    let x = this.x || 0;
+    let p = this.parentItem;
+    while (p) { x += (p.x || 0); p = p.parentItem; }
+    return x;
+  }
+  _sceneY() {
+    let y = this.y || 0;
+    let p = this.parentItem;
+    while (p) { y += (p.y || 0); p = p.parentItem; }
+    return y;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Stage G: ScrollView – viewport with automatic scrollbars
+// ---------------------------------------------------------------------------
+
+class ScrollView extends Item {
+  constructor(options = {}) {
+    super(options);
+
+    this.clip = true;
+
+    // ScrollBar policy defaults
+    this.defineProperty('ScrollBarVerticalPolicy',   options.ScrollBarVerticalPolicy   ?? 'ScrollBarAsNeeded');
+    this.defineProperty('ScrollBarHorizontalPolicy', options.ScrollBarHorizontalPolicy ?? 'ScrollBarAsNeeded');
+
+    const barW = 8;
+
+    // Internal Flickable that holds the content
+    this._flickable = new Flickable({
+      flickableDirection: 'HorizontalAndVerticalFlick',
+      parentItem: this,
+    });
+
+    // Vertical scrollbar
+    this._vBar = new ScrollBar({
+      orientation: 'Vertical',
+      parentItem: this,
+      policy: options.ScrollBarVerticalPolicy ?? 'ScrollBarAsNeeded',
+    });
+
+    // Horizontal scrollbar
+    this._hBar = new ScrollBar({
+      orientation: 'Horizontal',
+      parentItem: this,
+      policy: options.ScrollBarHorizontalPolicy ?? 'ScrollBarAsNeeded',
+    });
+
+    // Wire Flickable ↔ ScrollBars
+    this._flickable.connect('contentYChanged', () => this._syncBarsFromFlickable());
+    this._flickable.connect('contentXChanged', () => this._syncBarsFromFlickable());
+    this._flickable.connect('contentHeightChanged', () => this._syncBarsFromFlickable());
+    this._flickable.connect('contentWidthChanged', () => this._syncBarsFromFlickable());
+    this._vBar.connect('positionChanged', () => this._syncFlickableFromBar('v'));
+    this._hBar.connect('positionChanged', () => this._syncFlickableFromBar('h'));
+
+    // When size changes, re-layout
+    this.connect('widthChanged',  () => this._layout());
+    this.connect('heightChanged', () => this._layout());
+
+    this._layout();
+  }
+
+  _layout() {
+    const w = this.width  || 0;
+    const h = this.height || 0;
+    const barW = 8;
+    const vVisible = this._vBar._shouldShow();
+    const hVisible = this._hBar._shouldShow();
+    const innerW = w - (vVisible ? barW : 0);
+    const innerH = h - (hVisible ? barW : 0);
+
+    this._flickable.x = 0;
+    this._flickable.y = 0;
+    this._flickable.width  = Math.max(0, innerW);
+    this._flickable.height = Math.max(0, innerH);
+
+    this._vBar.x = innerW;
+    this._vBar.y = 0;
+    this._vBar.width  = barW;
+    this._vBar.height = Math.max(0, innerH);
+
+    this._hBar.x = 0;
+    this._hBar.y = innerH;
+    this._hBar.width  = Math.max(0, innerW);
+    this._hBar.height = barW;
+  }
+
+  _syncBarsFromFlickable() {
+    const f = this._flickable;
+    const cH = f.contentHeight || 0;
+    const vH = f.height || 1;
+    if (cH > 0) {
+      this._vBar.size     = Math.min(1, vH / cH);
+      this._vBar.position = Math.max(0, Math.min(1 - this._vBar.size, (f.contentY || 0) / cH));
+    } else {
+      this._vBar.size = 1; this._vBar.position = 0;
+    }
+
+    const cW = f.contentWidth || 0;
+    const vW = f.width || 1;
+    if (cW > 0) {
+      this._hBar.size     = Math.min(1, vW / cW);
+      this._hBar.position = Math.max(0, Math.min(1 - this._hBar.size, (f.contentX || 0) / cW));
+    } else {
+      this._hBar.size = 1; this._hBar.position = 0;
+    }
+
+    this._layout();
+  }
+
+  _syncFlickableFromBar(axis) {
+    const f = this._flickable;
+    if (axis === 'v') {
+      const cH = f.contentHeight || 0;
+      f.contentY = (this._vBar.position ?? 0) * cH;
+    } else {
+      const cW = f.contentWidth || 0;
+      f.contentX = (this._hBar.position ?? 0) * cW;
+    }
+  }
+
+  // Expose the inner flickable's contentItem-related properties
+  get contentWidth()  { return this._flickable.contentWidth;  }
+  set contentWidth(v) { this._flickable.contentWidth  = v; this._syncBarsFromFlickable(); }
+  get contentHeight() { return this._flickable.contentHeight; }
+  set contentHeight(v){ this._flickable.contentHeight = v; this._syncBarsFromFlickable(); }
+
+  handlePointerEvent(type, event) {
+    // Delegate to scrollbars first, then flickable
+    if (this._vBar.handlePointerEvent(type, event)) return true;
+    if (this._hBar.handlePointerEvent(type, event)) return true;
+    return this._flickable.handlePointerEvent(type, event);
+  }
+
+  handleWheelEvent(event) {
+    return this._flickable.handleWheelEvent(event);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Stage G: ApplicationWindow – root window container
+// ---------------------------------------------------------------------------
+
+class ApplicationWindow extends Item {
+  constructor(options = {}) {
+    super(options);
+
+    this.defineProperty('title',   options.title   ?? '');
+    this.defineProperty('visible', options.visible !== undefined ? options.visible : true);
+    this.defineProperty('color',   options.color   ?? '#ffffff');
+
+    this.implicitWidth  = options.width  || 800;
+    this.implicitHeight = options.height || 600;
+
+    // header / footer items (optional)
+    this._header = null;
+    this._footer = null;
+  }
+
+  get header() { return this._header; }
+  set header(v) {
+    this._header = v;
+    if (v instanceof Item) {
+      v.parentItem = this;
+      this._layoutContent();
+    }
+  }
+
+  get footer() { return this._footer; }
+  set footer(v) {
+    this._footer = v;
+    if (v instanceof Item) {
+      v.parentItem = this;
+      this._layoutContent();
+    }
+  }
+
+  _layoutContent() {
+    const w = this.width  || this.implicitWidth  || 800;
+    const h = this.height || this.implicitHeight || 600;
+    const headerH = (this._header && this._header.height) ? this._header.height : 0;
+    const footerH = (this._footer && this._footer.height) ? this._footer.height : 0;
+
+    if (this._header) {
+      this._header.x = 0; this._header.y = 0;
+      this._header.width = w;
+    }
+    if (this._footer) {
+      this._footer.x = 0;
+      this._footer.y = h - footerH;
+      this._footer.width = w;
+    }
+  }
+
+  draw(context) {
+    const w = this.width  || this.implicitWidth  || 800;
+    const h = this.height || this.implicitHeight || 600;
+    context.fillStyle = this.color || '#ffffff';
+    context.fillRect(0, 0, w, h);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Stage G: Page – content page with optional header/footer
+// ---------------------------------------------------------------------------
+
+class Page extends Item {
+  constructor(options = {}) {
+    super(options);
+
+    this.defineProperty('title',           options.title           ?? '');
+    this.defineProperty('background',      options.background      ?? '#ffffff');
+    this.defineProperty('padding',         options.padding         ?? 0);
+    this.defineProperty('topPadding',      options.topPadding      ?? 0);
+    this.defineProperty('bottomPadding',   options.bottomPadding   ?? 0);
+    this.defineProperty('leftPadding',     options.leftPadding     ?? 0);
+    this.defineProperty('rightPadding',    options.rightPadding    ?? 0);
+
+    this._header = null;
+    this._footer = null;
+  }
+
+  get header() { return this._header; }
+  set header(v) {
+    this._header = v;
+    if (v instanceof Item) {
+      v.parentItem = this;
+      this._layoutContent();
+    }
+  }
+
+  get footer() { return this._footer; }
+  set footer(v) {
+    this._footer = v;
+    if (v instanceof Item) {
+      v.parentItem = this;
+      this._layoutContent();
+    }
+  }
+
+  _layoutContent() {
+    const w = this.width  || 0;
+    const h = this.height || 0;
+    if (this._header) { this._header.x = 0; this._header.y = 0; this._header.width = w; }
+    if (this._footer) {
+      const fh = (this._footer.height) ? this._footer.height : 0;
+      this._footer.x = 0; this._footer.y = h - fh; this._footer.width = w;
+    }
+  }
+
+  draw(context) {
+    const w = this.width  || 0;
+    const h = this.height || 0;
+    if (w <= 0 || h <= 0) return;
+    context.fillStyle = this.background || '#ffffff';
+    context.fillRect(0, 0, w, h);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Stage G: StackView – push/pop page navigation
+// ---------------------------------------------------------------------------
+
+class StackView extends Item {
+  constructor(options = {}) {
+    super(options);
+
+    this.defineProperty('depth',         0,    { readOnly: true });
+    this.defineProperty('currentIndex',  -1,   { readOnly: true });
+    this.defineProperty('busy',          false, { readOnly: true });
+
+    this.defineSignal('pushed');
+    this.defineSignal('popped');
+    this.defineSignal('replaced');
+
+    // Internal stack: array of instantiated Items
+    this._stack = [];
+
+    // Optional initial item
+    if (options.initialItem) {
+      // Push after construction
+      Promise.resolve().then(() => this.push(options.initialItem));
+    }
+  }
+
+  // currentItem property (read-only, derived from _stack)
+  get currentItem() {
+    return this._stack.length > 0 ? this._stack[this._stack.length - 1] : null;
+  }
+
+  /**
+   * Push an item or component onto the stack.
+   * @param {Item|Function|object} item  Item instance, factory function, or options
+   * @param {object} [properties]        Properties to apply to the new item
+   * @returns {Item} The newly created/pushed item
+   */
+  push(item, properties) {
+    let page;
+    if (typeof item === 'function') {
+      // Component factory
+      page = item();
+    } else if (item instanceof Item) {
+      page = item;
+    } else {
+      // Plain object treated as a Rectangle placeholder
+      page = new Rectangle(item || {});
+    }
+
+    if (properties && typeof properties === 'object') {
+      for (const [k, v] of Object.entries(properties)) {
+        page[k] = v;
+      }
+    }
+
+    // Attach to StackView
+    page.parentItem = this;
+    page.x = 0; page.y = 0;
+    page.width  = this.width  || page.width  || 0;
+    page.height = this.height || page.height || 0;
+
+    // Hide all previous pages
+    for (const prev of this._stack) { prev.visible = false; }
+
+    this._stack.push(page);
+    this._setPropertyValue('depth', this._stack.length);
+    this._setPropertyValue('currentIndex', this._stack.length - 1);
+    this.pushed.emit(page);
+    return page;
+  }
+
+  /**
+   * Pop the top item off the stack.
+   * @returns {Item|null} The item that was removed, or null if stack was empty.
+   */
+  pop() {
+    if (this._stack.length <= 1) return null;
+    const removed = this._stack.pop();
+    removed.visible = false;
+    removed.parentItem = null;
+
+    const current = this._stack[this._stack.length - 1];
+    if (current) current.visible = true;
+
+    this._setPropertyValue('depth', this._stack.length);
+    this._setPropertyValue('currentIndex', this._stack.length - 1);
+    this.popped.emit(removed);
+    return removed;
+  }
+
+  /**
+   * Replace the current top item with a new one.
+   * @param {Item|Function|object} item
+   * @param {object} [properties]
+   * @returns {Item} The new top item
+   */
+  replace(item, properties) {
+    if (this._stack.length > 0) {
+      const old = this._stack.pop();
+      old.visible = false;
+      old.parentItem = null;
+    }
+    return this.push(item, properties);
+  }
+
+  /**
+   * Clear the stack, optionally keeping the bottom item.
+   */
+  clear() {
+    for (const page of this._stack) {
+      page.visible = false;
+      page.parentItem = null;
+    }
+    this._stack = [];
+    this._setPropertyValue('depth', 0);
+    this._setPropertyValue('currentIndex', -1);
+  }
+}
+
 const runtimeExports = {
   Signal,
   Binding,
@@ -6031,6 +6558,12 @@ const runtimeExports = {
   RowLayout,
   ColumnLayout,
   GridLayout,
+  // Stage G: extended controls
+  ScrollBar,
+  ScrollView,
+  ApplicationWindow,
+  Page,
+  StackView,
 };
 
 if (typeof module !== 'undefined' && module.exports) {

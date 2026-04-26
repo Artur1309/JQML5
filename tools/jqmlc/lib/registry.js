@@ -89,6 +89,12 @@ const RUNTIME_TYPES = [
   ['TextField', { kind: 'runtime', runtimeExport: 'TextField', category: 'controls', isItem: true }],
   ['Slider', { kind: 'runtime', runtimeExport: 'Slider', category: 'controls', isItem: true }],
   ['CheckBox', { kind: 'runtime', runtimeExport: 'CheckBox', category: 'controls', isItem: true }],
+  // Stage G: extended controls
+  ['ScrollBar', { kind: 'runtime', runtimeExport: 'ScrollBar', category: 'controls', isItem: true }],
+  ['ScrollView', { kind: 'runtime', runtimeExport: 'ScrollView', category: 'controls', isItem: true }],
+  ['ApplicationWindow', { kind: 'runtime', runtimeExport: 'ApplicationWindow', category: 'controls', isItem: true }],
+  ['Page', { kind: 'runtime', runtimeExport: 'Page', category: 'controls', isItem: true }],
+  ['StackView', { kind: 'runtime', runtimeExport: 'StackView', category: 'controls', isItem: true }],
   // Stage E: rendering improvements
   ['Image', { kind: 'runtime', runtimeExport: 'Image', category: 'quick', isItem: true }],
   // Stage D: grouped property block pseudo-types (lowercase; expanded inline in codegen)
@@ -118,7 +124,10 @@ function createDefaultRegistries() {
     listTypes: () => ['QtObject', 'Component', 'Binding', 'Context', 'ComponentScope'],
   });
   modules.registerModule('QtQuick.Controls', {
-    listTypes: () => ['Button', 'Label', 'TextField', 'Slider', 'CheckBox'],
+    listTypes: () => [
+      'Button', 'Label', 'TextField', 'Slider', 'CheckBox',
+      'ScrollBar', 'ScrollView', 'ApplicationWindow', 'Page', 'StackView',
+    ],
   });
   // QtQuick.Layouts – exposes RowLayout, ColumnLayout, GridLayout.
   // Layout.* attached properties (fillWidth, fillHeight, preferredWidth/Height,
