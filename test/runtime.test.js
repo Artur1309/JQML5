@@ -3492,3 +3492,249 @@ test('RowLayout re-layouts when child size changes', async () => {
   await nextTick();
   assert.equal(row.implicitWidth, 190);
 });
+
+// =============================================================================
+// Stage G: ScrollBar tests
+// =============================================================================
+
+test('ScrollBar defaults to Vertical orientation and correct properties', () => {
+  const { ScrollBar } = require('../src/runtime');
+  const bar = new ScrollBar();
+  assert.equal(bar.orientation, 'Vertical');
+  assert.equal(bar.size, 1.0);
+  assert.equal(bar.position, 0.0);
+  assert.equal(bar.active, false);
+  assert.equal(bar.policy, 'ScrollBarAsNeeded');
+  assert.equal(bar.minimumSize, 0.05);
+});
+
+test('ScrollBar _shouldShow returns false when size >= 1 and policy is AsNeeded', () => {
+  const { ScrollBar } = require('../src/runtime');
+  const bar = new ScrollBar({ size: 1.0, policy: 'ScrollBarAsNeeded' });
+  assert.equal(bar._shouldShow(), false);
+});
+
+test('ScrollBar _shouldShow returns true when size < 1 and policy is AsNeeded', () => {
+  const { ScrollBar } = require('../src/runtime');
+  const bar = new ScrollBar({ size: 0.5, policy: 'ScrollBarAsNeeded' });
+  assert.equal(bar._shouldShow(), true);
+});
+
+test('ScrollBar _shouldShow obeys AlwaysOn and AlwaysOff policies', () => {
+  const { ScrollBar } = require('../src/runtime');
+  const on  = new ScrollBar({ size: 1.0, policy: 'ScrollBarAlwaysOn' });
+  const off = new ScrollBar({ size: 0.3, policy: 'ScrollBarAlwaysOff' });
+  assert.equal(on._shouldShow(),  true);
+  assert.equal(off._shouldShow(), false);
+});
+
+test('ScrollBar _thumbRect computes correct vertical thumb geometry', () => {
+  const { ScrollBar } = require('../src/runtime');
+  const bar = new ScrollBar({ orientation: 'Vertical', size: 0.5, position: 0.0 });
+  bar.width = 8; bar.height = 100;
+  const t = bar._thumbRect();
+  assert.equal(t.y, 0);
+  assert.equal(t.height, 50);
+  assert.equal(t.x, 0);
+  assert.equal(t.width, 8);
+});
+
+test('ScrollBar _thumbRect computes correct horizontal thumb position', () => {
+  const { ScrollBar } = require('../src/runtime');
+  const bar = new ScrollBar({ orientation: 'Horizontal', size: 0.25, position: 0.5 });
+  bar.width = 200; bar.height = 8;
+  const t = bar._thumbRect();
+  // position=0.5, size=0.25 → thumbLen=50, thumbOff=100
+  assert.equal(t.x, 100);
+  assert.equal(t.width, 50);
+});
+
+test('ScrollBar position is clamped to [0, 1-size] in _thumbRect', () => {
+  const { ScrollBar } = require('../src/runtime');
+  const bar = new ScrollBar({ orientation: 'Vertical', size: 0.3, position: 0.9 });
+  bar.width = 8; bar.height = 100;
+  const t = bar._thumbRect();
+  // position clamped to 0.7
+  assert.ok(t.y <= 70 + 0.01);
+});
+
+test('ScrollBar emits moved signal when position changes via drag', () => {
+  const { ScrollBar } = require('../src/runtime');
+  const bar = new ScrollBar({ orientation: 'Vertical', size: 0.5, position: 0 });
+  bar.width = 8; bar.height = 100;
+  // Make the ScrollBar visible
+  bar.policy = 'ScrollBarAlwaysOn';
+
+  const moved = [];
+  bar.moved.connect(() => moved.push(bar.position));
+
+  // Simulate pointer-down on the thumb (thumb covers y 0..50)
+  bar.handlePointerEvent('down', { sceneX: 4, sceneY: 25 });
+  // Drag down by 30 pixels
+  bar.handlePointerEvent('move', { sceneX: 4, sceneY: 55 });
+  bar.handlePointerEvent('up',   { sceneX: 4, sceneY: 55 });
+
+  assert.ok(moved.length > 0, 'moved signal should have been emitted');
+  assert.ok(bar.position > 0, 'position should have increased after drag');
+});
+
+test('ScrollBar wires to Flickable via attached properties API', () => {
+  const { ScrollBar, Flickable } = require('../src/runtime');
+
+  const flickable = new Flickable({
+    flickableDirection: 'VerticalFlick',
+  });
+  flickable.width  = 300;
+  flickable.height = 200;
+  flickable.contentWidth  = 300;
+  flickable.contentHeight = 600;
+
+  const bar = new ScrollBar({ orientation: 'Vertical' });
+
+  // Manually wire (mimics what the codegen attached handler does)
+  bar.parentItem = flickable;
+  function syncV() {
+    const cH = flickable.contentHeight || 0;
+    const vH = flickable.height || 1;
+    if (cH > 0) {
+      bar.size     = Math.min(1, vH / cH);
+      bar.position = Math.max(0, Math.min(1 - bar.size, (flickable.contentY || 0) / cH));
+    } else { bar.size = 1; bar.position = 0; }
+  }
+  syncV();
+  flickable.contentYChanged.connect(syncV);
+  bar.moved.connect(() => {
+    const cH = flickable.contentHeight || 0;
+    flickable.contentY = (bar.position || 0) * cH;
+  });
+
+  // Initial size: viewport 200 / content 600 = 1/3
+  assert.ok(Math.abs(bar.size - 1 / 3) < 0.001, 'initial bar.size should be 1/3');
+  assert.equal(bar.position, 0, 'initial bar.position should be 0');
+
+  // Scroll flickable to middle
+  flickable.contentY = 200;
+  assert.ok(Math.abs(bar.position - 200 / 600) < 0.001, 'position should track contentY');
+
+  // Move the bar
+  bar.position = 0;
+  bar.moved.emit();
+  assert.equal(flickable.contentY, 0, 'flickable should scroll when bar moves');
+});
+
+// =============================================================================
+// Stage G: StackView tests
+// =============================================================================
+
+test('StackView starts empty', () => {
+  const { StackView } = require('../src/runtime');
+  const sv = new StackView();
+  assert.equal(sv.depth, 0);
+  assert.equal(sv.currentIndex, -1);
+  assert.equal(sv.currentItem, null);
+});
+
+test('StackView push adds an item and updates depth/currentItem', () => {
+  const { StackView, Rectangle } = require('../src/runtime');
+  const sv = new StackView();
+  sv.width = 400; sv.height = 300;
+
+  const page = new Rectangle({ color: '#ff0000' });
+  const pushed = sv.push(page);
+
+  assert.equal(pushed, page);
+  assert.equal(sv.depth, 1);
+  assert.equal(sv.currentIndex, 0);
+  assert.equal(sv.currentItem, page);
+});
+
+test('StackView push hides previous item', () => {
+  const { StackView, Rectangle } = require('../src/runtime');
+  const sv = new StackView();
+  sv.width = 400; sv.height = 300;
+
+  const page1 = new Rectangle({ color: '#ff0000' });
+  const page2 = new Rectangle({ color: '#0000ff' });
+
+  sv.push(page1);
+  sv.push(page2);
+
+  assert.equal(sv.depth, 2);
+  assert.equal(sv.currentItem, page2);
+  assert.equal(page1.visible, false, 'page1 should be hidden');
+  assert.equal(page2.visible, true,  'page2 should be visible');
+});
+
+test('StackView pop removes top item and reveals previous', () => {
+  const { StackView, Rectangle } = require('../src/runtime');
+  const sv = new StackView();
+  sv.width = 400; sv.height = 300;
+
+  const page1 = new Rectangle({ color: '#ff0000' });
+  const page2 = new Rectangle({ color: '#0000ff' });
+
+  sv.push(page1);
+  sv.push(page2);
+  const removed = sv.pop();
+
+  assert.equal(removed, page2);
+  assert.equal(sv.depth, 1);
+  assert.equal(sv.currentItem, page1);
+  assert.equal(page1.visible, true,  'page1 should be visible again');
+});
+
+test('StackView pop on single item returns null and keeps stack intact', () => {
+  const { StackView, Rectangle } = require('../src/runtime');
+  const sv = new StackView();
+  sv.width = 400; sv.height = 300;
+
+  const page = new Rectangle();
+  sv.push(page);
+  const result = sv.pop();
+
+  assert.equal(result, null, 'pop on single item should return null');
+  assert.equal(sv.depth, 1, 'stack depth should remain 1');
+});
+
+test('StackView clear empties the stack', () => {
+  const { StackView, Rectangle } = require('../src/runtime');
+  const sv = new StackView();
+  sv.width = 400; sv.height = 300;
+
+  sv.push(new Rectangle());
+  sv.push(new Rectangle());
+  sv.clear();
+
+  assert.equal(sv.depth, 0);
+  assert.equal(sv.currentIndex, -1);
+  assert.equal(sv.currentItem, null);
+});
+
+test('StackView replace swaps the top item', () => {
+  const { StackView, Rectangle } = require('../src/runtime');
+  const sv = new StackView();
+  sv.width = 400; sv.height = 300;
+
+  const page1 = new Rectangle({ color: '#ff0000' });
+  const page2 = new Rectangle({ color: '#00ff00' });
+
+  sv.push(page1);
+  sv.replace(page2);
+
+  assert.equal(sv.depth, 1);
+  assert.equal(sv.currentItem, page2);
+});
+
+test('StackView push with factory function creates item', () => {
+  const { StackView, Rectangle } = require('../src/runtime');
+  const sv = new StackView();
+  sv.width = 400; sv.height = 300;
+
+  let created = false;
+  const factory = () => { created = true; return new Rectangle({ color: '#abcdef' }); };
+  const result = sv.push(factory);
+
+  assert.equal(created, true, 'factory should have been called');
+  assert.ok(result instanceof Rectangle);
+  assert.equal(sv.depth, 1);
+});

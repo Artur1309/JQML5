@@ -135,7 +135,7 @@ function generateComponentFactory(component, moduleIdMap) {
   output += `        }\n`;
   output += `        // Stage D: Attached property handler dispatch (registry-driven)\n`;
   output += `        if (__ATTACHED_HANDLERS[prop.name]) {\n`;
-  output += `          __ATTACHED_HANDLERS[prop.name](object, prop.value, scopeState);\n`;
+  output += `          __ATTACHED_HANDLERS[prop.name](object, __compileValue(object, prop.value, scopeState, prop.name, false), scopeState);\n`;
   output += `          continue;\n`;
   output += `        }\n`;
   // Layout.* attached properties not listed in the registry: store gracefully
@@ -411,6 +411,57 @@ const __ATTACHED_HANDLERS = {
       return __runJs(_v, hs, object);
     };
   },
+  // ScrollBar attached properties on Flickable / ListView
+  'ScrollBar.vertical': function(object, bar, scopeState) {
+    if (bar instanceof __runtime.Binding) { try { bar = bar.evaluate(object); } catch(_) { bar = null; } }
+    if (!(bar instanceof __runtime.ScrollBar)) return;
+    // Attach bar to the flickable parent
+    bar.parentItem = object;
+    bar.orientation = 'Vertical';
+    if (!object.__scrollBars) object.__scrollBars = {};
+    object.__scrollBars.vertical = bar;
+    // Wire Flickable ↔ bar
+    function _syncV() {
+      var cH = object.contentHeight || 0;
+      var vH = object.height || 1;
+      if (cH > 0) {
+        bar.size = Math.min(1, vH / cH);
+        bar.position = Math.max(0, Math.min(1 - bar.size, (object.contentY || 0) / cH));
+      } else { bar.size = 1; bar.position = 0; }
+    }
+    _syncV();
+    if (object.contentYChanged) object.contentYChanged.connect(_syncV);
+    if (object.contentHeightChanged) object.contentHeightChanged.connect(_syncV);
+    if (object.heightChanged) object.heightChanged.connect(_syncV);
+    bar.moved.connect(function() {
+      var cH = object.contentHeight || 0;
+      object.contentY = (bar.position || 0) * cH;
+    });
+  },
+  'ScrollBar.horizontal': function(object, bar, scopeState) {
+    if (bar instanceof __runtime.Binding) { try { bar = bar.evaluate(object); } catch(_) { bar = null; } }
+    if (!(bar instanceof __runtime.ScrollBar)) return;
+    bar.parentItem = object;
+    bar.orientation = 'Horizontal';
+    if (!object.__scrollBars) object.__scrollBars = {};
+    object.__scrollBars.horizontal = bar;
+    function _syncH() {
+      var cW = object.contentWidth || 0;
+      var vW = object.width || 1;
+      if (cW > 0) {
+        bar.size = Math.min(1, vW / cW);
+        bar.position = Math.max(0, Math.min(1 - bar.size, (object.contentX || 0) / cW));
+      } else { bar.size = 1; bar.position = 0; }
+    }
+    _syncH();
+    if (object.contentXChanged) object.contentXChanged.connect(_syncH);
+    if (object.contentWidthChanged) object.contentWidthChanged.connect(_syncH);
+    if (object.widthChanged) object.widthChanged.connect(_syncH);
+    bar.moved.connect(function() {
+      var cW = object.contentWidth || 0;
+      object.contentX = (bar.position || 0) * cW;
+    });
+  },
 };
 
 // 3. Grouped property block metadata: lowercase group name → expansion rules.
@@ -467,6 +518,13 @@ const __ENUM_TABLE = {
   'TextInput.AlignLeft':    'left',
   'TextInput.AlignRight':   'right',
   'TextInput.AlignHCenter': 'center',
+  // Qt orientation constants
+  'Qt.Vertical':   'Vertical',
+  'Qt.Horizontal': 'Horizontal',
+  // ScrollBar policy constants
+  'ScrollBar.AsNeeded':  'ScrollBarAsNeeded',
+  'ScrollBar.AlwaysOff': 'ScrollBarAlwaysOff',
+  'ScrollBar.AlwaysOn':  'ScrollBarAlwaysOn',
 };
 const __exprCache = new Map();
 function __compileExpression(code) {
