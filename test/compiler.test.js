@@ -1200,3 +1200,23 @@ Item {
   assert.match(js, /#f0f0f0/);
   assert.match(js, /#e0e0e0/);
 });
+
+test('parser: property assignment with semicolon followed by newline and next property parses correctly', () => {
+  const ast = parseQml(`
+import QtQuick 2.15
+Item {
+  width: 960 + height * 2;
+  height: 640
+}
+`, 'SemicolonNewline.qml');
+
+  assert.equal(ast.rootObject.typeName, 'Item');
+  const widthProp = ast.rootObject.properties.find((p) => p.name === 'width');
+  const heightProp = ast.rootObject.properties.find((p) => p.name === 'height');
+  assert.ok(widthProp, 'width property should exist');
+  assert.ok(heightProp, 'height property should exist');
+  assert.equal(widthProp.value.kind, 'JsExpressionValue');
+  assert.match(widthProp.value.raw, /960/);
+  assert.equal(heightProp.value.kind, 'NumberValue');
+  assert.equal(heightProp.value.value, 640);
+});

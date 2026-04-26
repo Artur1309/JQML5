@@ -339,13 +339,28 @@ function parseValue(tokenizer, propertyName = '') {
   }
 
   if (char === '-' || /[0-9]/.test(char)) {
+    const checkpoint = tokenizer.location();
     const number = tokenizer.readNumber();
-    return {
-      kind: 'NumberValue',
-      value: number.value,
-      raw: number.raw,
-      location: number.location,
-    };
+    // Peek ahead (on the same line) to detect compound expressions like "960 + height * 2"
+    const afterNum = tokenizer.location();
+    tokenizer.skipWhitespaceAndComments({ preserveNewlines: true });
+    const nextChar = tokenizer.current();
+    tokenizer.index = afterNum.index;
+    tokenizer.line = afterNum.line;
+    tokenizer.column = afterNum.column;
+    if (/[+\-*/%<>=!&|?]/.test(nextChar)) {
+      // Compound expression — restore to start and fall through to readJsExpression
+      tokenizer.index = checkpoint.index;
+      tokenizer.line = checkpoint.line;
+      tokenizer.column = checkpoint.column;
+    } else {
+      return {
+        kind: 'NumberValue',
+        value: number.value,
+        raw: number.raw,
+        location: number.location,
+      };
+    }
   }
 
   if (/[A-Za-z_]/.test(char)) {
@@ -407,6 +422,12 @@ function parseValue(tokenizer, propertyName = '') {
 function consumeTerminator(tokenizer) {
   tokenizer.skipWhitespaceAndComments({ preserveNewlines: true });
   if (tokenizer.current() === ';') {
+    tokenizer.advance();
+  }
+  // Consume any newlines that follow — newlines are valid QML statement terminators.
+  // After consuming ';', the cursor may be on '\n'. Consuming it here prevents the
+  // next readIdentifier() call from failing with "Expected an identifier".
+  while (tokenizer.current() === '\n') {
     tokenizer.advance();
   }
   tokenizer.skipWhitespaceAndComments({ preserveNewlines: false });
