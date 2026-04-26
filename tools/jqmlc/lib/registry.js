@@ -71,6 +71,13 @@ const RUNTIME_TYPES = [
   ['Keys', { kind: 'runtime', runtimeExport: 'Keys', category: 'quick-input' }],
   ['TapHandler', { kind: 'runtime', runtimeExport: 'TapHandler', category: 'quick-input', isItem: true }],
   ['DragHandler', { kind: 'runtime', runtimeExport: 'DragHandler', category: 'quick-input', isItem: true }],
+  // Stage D: controls MVP
+  ['Theme', { kind: 'runtime', runtimeExport: 'Theme', category: 'controls' }],
+  ['Button', { kind: 'runtime', runtimeExport: 'Button', category: 'controls', isItem: true }],
+  ['Label', { kind: 'runtime', runtimeExport: 'Label', category: 'controls', isItem: true }],
+  ['TextField', { kind: 'runtime', runtimeExport: 'TextField', category: 'controls', isItem: true }],
+  ['Slider', { kind: 'runtime', runtimeExport: 'Slider', category: 'controls', isItem: true }],
+  ['CheckBox', { kind: 'runtime', runtimeExport: 'CheckBox', category: 'controls', isItem: true }],
 ];
 
 function createDefaultRegistries() {
@@ -94,7 +101,7 @@ function createDefaultRegistries() {
     listTypes: () => ['QtObject', 'Component', 'Binding', 'Context', 'ComponentScope'],
   });
   modules.registerModule('QtQuick.Controls', {
-    listTypes: () => [],
+    listTypes: () => ['Button', 'Label', 'TextField', 'Slider', 'CheckBox'],
   });
 
   return {

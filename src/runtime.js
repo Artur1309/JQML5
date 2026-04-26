@@ -2330,16 +2330,23 @@ class Scene {
       accepted: false,
     };
 
+    let acceptingItem = null;
     let current = target;
     while (current) {
       if (typeof current.handlePointerEvent === 'function') {
         const accepted = current.handlePointerEvent(type, event);
         if (accepted) {
           event.accepted = true;
+          acceptingItem = current;
           break;
         }
       }
       current = current.parentItem;
+    }
+
+    // Stage D: auto-focus focusable controls when they accept a 'down' event
+    if (type === 'down' && acceptingItem instanceof Item && acceptingItem._isFocusableByTab()) {
+      this.forceActiveFocus(acceptingItem);
     }
 
     if (event.accepted) {
@@ -2997,6 +3004,584 @@ class ListView extends Item {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Stage D: Controls MVP – shared helpers
+// ---------------------------------------------------------------------------
+
+// Default visual theme used by all controls
+const Theme = {
+  palette: {
+    background: '#f5f5f5',
+    surface: '#ffffff',
+    primary: '#4a79ff',
+    primaryHover: '#3a69ef',
+    primaryPressed: '#2858c5',
+    text: '#1a1a2e',
+    textSecondary: '#999999',
+    border: '#c0c0d0',
+    borderFocus: '#4a79ff',
+    disabled: '#d0d0d8',
+    disabledText: '#aaaaaa',
+    checkmark: '#ffffff',
+    sliderTrack: '#c0c0d0',
+    sliderFill: '#4a79ff',
+    sliderHandle: '#ffffff',
+    inputBackground: '#ffffff',
+    inputBorder: '#c0c0d0',
+    cursor: '#1a1a2e',
+  },
+  font: {
+    family: 'sans-serif',
+    pixelSize: 14,
+    bold: false,
+  },
+};
+
+// Shared rounded-rectangle drawing helper
+function _ctrlRoundRect(ctx, x, y, w, h, r) {
+  const radius = Math.max(0, Math.min(r, w / 2, h / 2));
+  ctx.beginPath();
+  ctx.moveTo(x + radius, y);
+  ctx.lineTo(x + w - radius, y);
+  ctx.quadraticCurveTo(x + w, y, x + w, y + radius);
+  ctx.lineTo(x + w, y + h - radius);
+  ctx.quadraticCurveTo(x + w, y + h, x + w - radius, y + h);
+  ctx.lineTo(x + radius, y + h);
+  ctx.quadraticCurveTo(x, y + h, x, y + h - radius);
+  ctx.lineTo(x, y + radius);
+  ctx.quadraticCurveTo(x, y, x + radius, y);
+  ctx.closePath();
+}
+
+// ---------------------------------------------------------------------------
+// Stage D: Button
+// ---------------------------------------------------------------------------
+
+class Button extends Item {
+  constructor(options = {}) {
+    super(options);
+
+    this.defineProperty('text', options.text ?? '');
+    this.defineProperty('hovered', false);
+    this.defineProperty('pressed', false);
+
+    this.defineSignal('clicked');
+    this.defineSignal('released');
+
+    // Make focusable by default
+    this.activeFocusOnTab = true;
+    this.focusable = true;
+
+    // Default implicit size
+    this.implicitWidth = 100;
+    this.implicitHeight = 36;
+
+    // Keyboard activation via Enter / Space
+    this._keys = new Keys();
+    this._keys.onPressed = (event) => {
+      if (!this.enabled) return;
+      if (event.key === 'Enter' || event.key === ' ') {
+        this.clicked.emit();
+        event.accepted = true;
+      }
+    };
+  }
+
+  handlePointerEvent(type, event) {
+    if (!this.enabled) return false;
+
+    if (type === 'down') {
+      this._setPropertyValue('pressed', true);
+      this._setPropertyValue('hovered', true);
+      return true;
+    }
+
+    if (type === 'move') {
+      const isOver = this.containsPoint(event.sceneX, event.sceneY);
+      this._setPropertyValue('hovered', isOver);
+      return this._propertyValues.get('pressed') === true;
+    }
+
+    if (type === 'up') {
+      const wasPressed = this._propertyValues.get('pressed');
+      this._setPropertyValue('pressed', false);
+      const isOver = this.containsPoint(event.sceneX, event.sceneY);
+      this._setPropertyValue('hovered', isOver);
+      this.released.emit(event);
+      if (wasPressed && isOver) {
+        this.clicked.emit(event);
+      }
+      return Boolean(wasPressed);
+    }
+
+    return false;
+  }
+
+  draw(context) {
+    const w = this.width || this.implicitWidth || 100;
+    const h = this.height || this.implicitHeight || 36;
+    if (w <= 0 || h <= 0) return;
+
+    const p = Theme.palette;
+    let bg;
+    if (!this.enabled) {
+      bg = p.disabled;
+    } else if (this._propertyValues.get('pressed')) {
+      bg = p.primaryPressed;
+    } else if (this._propertyValues.get('hovered')) {
+      bg = p.primaryHover;
+    } else {
+      bg = p.primary;
+    }
+
+    const radius = 6;
+    _ctrlRoundRect(context, 0, 0, w, h, radius);
+    context.fillStyle = bg;
+    context.fill();
+
+    // Focus ring
+    if (this.activeFocus) {
+      _ctrlRoundRect(context, -2, -2, w + 4, h + 4, radius + 2);
+      context.strokeStyle = p.borderFocus;
+      context.lineWidth = 2;
+      context.stroke();
+    }
+
+    // Label
+    const text = String(this.text ?? '');
+    if (text) {
+      const font = Theme.font;
+      context.font = `${font.bold ? 'bold ' : ''}${font.pixelSize}px ${font.family}`;
+      context.fillStyle = !this.enabled ? p.disabledText : '#ffffff';
+      context.textAlign = 'center';
+      context.textBaseline = 'middle';
+      context.fillText(text, w / 2, h / 2);
+      context.textAlign = 'left';
+      context.textBaseline = 'top';
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Stage D: Label
+// ---------------------------------------------------------------------------
+
+class Label extends Item {
+  constructor(options = {}) {
+    super(options);
+
+    this.defineProperty('text', options.text ?? '');
+    this.defineProperty('color', options.color ?? Theme.palette.text);
+    this.defineProperty('font', options.font ?? { ...Theme.font });
+  }
+
+  draw(context) {
+    const text = String(this.text ?? '');
+    if (!text) return;
+    const font = this.font || Theme.font;
+    const size = font.pixelSize || 14;
+    const family = font.family || 'sans-serif';
+    const bold = font.bold ? 'bold ' : '';
+    context.font = `${bold}${size}px ${family}`;
+    context.fillStyle = this.color || Theme.palette.text;
+    context.textBaseline = 'top';
+    context.fillText(text, 0, 0);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Stage D: TextField
+// ---------------------------------------------------------------------------
+
+class TextField extends Item {
+  constructor(options = {}) {
+    super(options);
+
+    this.defineProperty('text', options.text ?? '');
+    this.defineProperty('placeholderText', options.placeholderText ?? '');
+
+    // Make focusable
+    this.activeFocusOnTab = true;
+    this.focusable = true;
+
+    this.implicitWidth = 120;
+    this.implicitHeight = 32;
+
+    // Cursor state (internal)
+    this._cursorPos = (options.text ?? '').length;
+    this._cursorVisible = false;
+    this._cursorBlinkTimer = null;
+
+    // Keyboard input handler
+    this._keys = new Keys();
+    this._keys.onPressed = (event) => {
+      this._handleKeyInput(event);
+    };
+
+    // Start/stop cursor blink on focus change
+    this.connect('activeFocusChanged', (focused) => {
+      if (focused) {
+        this._cursorVisible = true;
+        this._startCursorBlink();
+      } else {
+        this._stopCursorBlink();
+        this._cursorVisible = false;
+      }
+    });
+  }
+
+  _handleKeyInput(event) {
+    const ctrl = event.ctrlKey || event.ctrl;
+    let text = this.text;
+
+    if (event.key === 'Backspace') {
+      if (this._cursorPos > 0) {
+        this.text = text.slice(0, this._cursorPos - 1) + text.slice(this._cursorPos);
+        this._cursorPos -= 1;
+      }
+      event.accepted = true;
+    } else if (event.key === 'Delete') {
+      if (this._cursorPos < text.length) {
+        this.text = text.slice(0, this._cursorPos) + text.slice(this._cursorPos + 1);
+      }
+      event.accepted = true;
+    } else if (event.key === 'ArrowLeft') {
+      if (this._cursorPos > 0) this._cursorPos -= 1;
+      event.accepted = true;
+    } else if (event.key === 'ArrowRight') {
+      if (this._cursorPos < text.length) this._cursorPos += 1;
+      event.accepted = true;
+    } else if (event.key === 'Home') {
+      this._cursorPos = 0;
+      event.accepted = true;
+    } else if (event.key === 'End') {
+      this._cursorPos = text.length;
+      event.accepted = true;
+    } else if (event.key && event.key.length === 1 && !ctrl) {
+      this.text = text.slice(0, this._cursorPos) + event.key + text.slice(this._cursorPos);
+      this._cursorPos += 1;
+      event.accepted = true;
+    }
+  }
+
+  _startCursorBlink() {
+    this._stopCursorBlink();
+    this._cursorVisible = true;
+    if (typeof setInterval === 'function') {
+      const timer = setInterval(() => {
+        this._cursorVisible = !this._cursorVisible;
+      }, 500);
+      // In Node.js, unref so the timer doesn't prevent process exit
+      if (timer && typeof timer.unref === 'function') {
+        timer.unref();
+      }
+      this._cursorBlinkTimer = timer;
+    }
+  }
+
+  _stopCursorBlink() {
+    if (this._cursorBlinkTimer != null) {
+      if (typeof clearInterval === 'function') {
+        clearInterval(this._cursorBlinkTimer);
+      }
+      this._cursorBlinkTimer = null;
+    }
+  }
+
+  handlePointerEvent(type, event) {
+    if (type === 'down') {
+      // Position cursor at click (approximate)
+      const localX = event.x;
+      const text = this.text;
+      const font = Theme.font;
+      // Best-effort character index from click position
+      // Without actual canvas context here we place cursor at end
+      this._cursorPos = text.length;
+      return true;
+    }
+    return false;
+  }
+
+  draw(context) {
+    const w = this.width || this.implicitWidth || 120;
+    const h = this.height || this.implicitHeight || 32;
+    const p = Theme.palette;
+    const padding = 8;
+
+    // Background / border
+    _ctrlRoundRect(context, 0, 0, w, h, 4);
+    context.fillStyle = p.inputBackground;
+    context.fill();
+
+    context.strokeStyle = this.activeFocus ? p.borderFocus : p.inputBorder;
+    context.lineWidth = this.activeFocus ? 2 : 1;
+    context.stroke();
+
+    // Clip text area
+    context.save();
+    context.beginPath();
+    context.rect(padding, 2, w - padding * 2, h - 4);
+    context.clip();
+
+    const font = Theme.font;
+    context.font = `${font.pixelSize}px ${font.family}`;
+    context.textBaseline = 'middle';
+
+    const text = String(this.text ?? '');
+    const placeholder = String(this.placeholderText ?? '');
+
+    if (text) {
+      context.fillStyle = p.text;
+      context.fillText(text, padding, h / 2);
+    } else if (placeholder) {
+      context.fillStyle = p.textSecondary;
+      context.fillText(placeholder, padding, h / 2);
+    }
+
+    // Cursor
+    if (this.activeFocus && this._cursorVisible) {
+      const cursorText = text.slice(0, this._cursorPos);
+      const cursorX = padding + context.measureText(cursorText).width;
+      context.strokeStyle = p.cursor;
+      context.lineWidth = 1;
+      context.beginPath();
+      context.moveTo(cursorX, 4);
+      context.lineTo(cursorX, h - 4);
+      context.stroke();
+    }
+
+    context.restore();
+  }
+
+  destroy() {
+    this._stopCursorBlink();
+    super.destroy();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Stage D: Slider
+// ---------------------------------------------------------------------------
+
+class Slider extends Item {
+  constructor(options = {}) {
+    super(options);
+
+    this.defineProperty('from', options.from ?? 0);
+    this.defineProperty('to', options.to ?? 1);
+    this.defineProperty('value', options.value ?? 0, {
+      coerce: (val) => {
+        const from = typeof this.from === 'number' ? this.from : 0;
+        const to = typeof this.to === 'number' ? this.to : 1;
+        const step = typeof this.stepSize === 'number' ? this.stepSize : 0;
+        const lo = Math.min(from, to);
+        const hi = Math.max(from, to);
+        let v = Math.max(lo, Math.min(hi, typeof val === 'number' ? val : 0));
+        if (step > 0) {
+          v = Math.round((v - from) / step) * step + from;
+          v = Math.max(lo, Math.min(hi, v));
+        }
+        return v;
+      },
+    });
+    this.defineProperty('stepSize', options.stepSize ?? 0);
+
+    this.activeFocusOnTab = true;
+    this.focusable = true;
+
+    this.implicitWidth = 200;
+    this.implicitHeight = 24;
+
+    this._dragging = false;
+
+    // Keyboard: arrow keys adjust value
+    this._keys = new Keys();
+    this._keys.onPressed = (event) => {
+      if (!this.enabled) return;
+      const range = Math.abs(this.to - this.from);
+      const step = this.stepSize > 0 ? this.stepSize : range / 10;
+      const dir = this.to >= this.from ? 1 : -1;
+      if (event.key === 'ArrowRight' || event.key === 'ArrowUp') {
+        this.value = this._clamp(this.value + step * dir);
+        event.accepted = true;
+      } else if (event.key === 'ArrowLeft' || event.key === 'ArrowDown') {
+        this.value = this._clamp(this.value - step * dir);
+        event.accepted = true;
+      }
+    };
+  }
+
+  _clamp(val) {
+    const lo = Math.min(this.from, this.to);
+    const hi = Math.max(this.from, this.to);
+    let v = Math.max(lo, Math.min(hi, val));
+    if (this.stepSize > 0) {
+      v = Math.round((v - this.from) / this.stepSize) * this.stepSize + this.from;
+      v = Math.max(lo, Math.min(hi, v));
+    }
+    return v;
+  }
+
+  _valueFromSceneX(sceneX) {
+    const w = this.width || this.implicitWidth || 200;
+    const trackStart = 12;
+    const trackEnd = w - 12;
+    const local = this.mapFromItem(null, sceneX, 0);
+    const t = Math.max(0, Math.min(1, (local.x - trackStart) / (trackEnd - trackStart)));
+    return this._clamp(this.from + t * (this.to - this.from));
+  }
+
+  handlePointerEvent(type, event) {
+    if (!this.enabled) return false;
+
+    if (type === 'down') {
+      this._dragging = true;
+      this.value = this._valueFromSceneX(event.sceneX);
+      return true;
+    }
+
+    if (type === 'move' && this._dragging) {
+      this.value = this._valueFromSceneX(event.sceneX);
+      return true;
+    }
+
+    if (type === 'up') {
+      const was = this._dragging;
+      this._dragging = false;
+      return was;
+    }
+
+    return false;
+  }
+
+  draw(context) {
+    const w = this.width || this.implicitWidth || 200;
+    const h = this.height || this.implicitHeight || 24;
+    const p = Theme.palette;
+    const trackY = h / 2;
+    const trackStart = 12;
+    const trackEnd = w - 12;
+    const trackH = 4;
+
+    // Track background
+    _ctrlRoundRect(context, trackStart, trackY - trackH / 2, trackEnd - trackStart, trackH, 2);
+    context.fillStyle = p.sliderTrack;
+    context.fill();
+
+    // Track fill
+    const range = this.to - this.from;
+    const pos = range !== 0 ? (this.value - this.from) / range : 0;
+    const fillW = Math.max(0, (trackEnd - trackStart) * pos);
+    if (fillW > 0) {
+      _ctrlRoundRect(context, trackStart, trackY - trackH / 2, fillW, trackH, 2);
+      context.fillStyle = p.sliderFill;
+      context.fill();
+    }
+
+    // Handle knob
+    const handleX = trackStart + fillW;
+    const handleR = 9;
+    context.beginPath();
+    context.arc(handleX, trackY, handleR, 0, Math.PI * 2);
+    context.fillStyle = p.sliderHandle;
+    context.fill();
+    context.strokeStyle = this.activeFocus ? p.borderFocus : p.border;
+    context.lineWidth = this.activeFocus ? 2 : 1;
+    context.stroke();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Stage D: CheckBox
+// ---------------------------------------------------------------------------
+
+class CheckBox extends Item {
+  constructor(options = {}) {
+    super(options);
+
+    this.defineProperty('text', options.text ?? '');
+    this.defineProperty('checked', Boolean(options.checked ?? false));
+
+    this.defineSignal('clicked');
+
+    this.activeFocusOnTab = true;
+    this.focusable = true;
+
+    this.implicitWidth = 120;
+    this.implicitHeight = 24;
+
+    // Keyboard: Enter / Space toggles
+    this._keys = new Keys();
+    this._keys.onPressed = (event) => {
+      if (!this.enabled) return;
+      if (event.key === 'Enter' || event.key === ' ') {
+        this.checked = !this.checked;
+        this.clicked.emit();
+        event.accepted = true;
+      }
+    };
+  }
+
+  handlePointerEvent(type, event) {
+    if (!this.enabled) return false;
+
+    if (type === 'down') {
+      return true;
+    }
+
+    if (type === 'up') {
+      if (this.containsPoint(event.sceneX, event.sceneY)) {
+        this.checked = !this.checked;
+        this.clicked.emit(event);
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  draw(context) {
+    const h = this.height || this.implicitHeight || 24;
+    const p = Theme.palette;
+    const boxSize = 18;
+    const boxY = Math.round((h - boxSize) / 2);
+
+    // Box
+    _ctrlRoundRect(context, 0, boxY, boxSize, boxSize, 3);
+    context.fillStyle = this.checked ? p.primary : p.inputBackground;
+    context.fill();
+    context.strokeStyle = this.activeFocus ? p.borderFocus : p.border;
+    context.lineWidth = this.activeFocus ? 2 : 1;
+    context.stroke();
+
+    // Checkmark
+    if (this.checked) {
+      context.strokeStyle = p.checkmark;
+      context.lineWidth = 2;
+      context.lineCap = 'round';
+      context.lineJoin = 'round';
+      context.beginPath();
+      context.moveTo(3, boxY + boxSize / 2);
+      context.lineTo(boxSize / 2 - 1, boxY + boxSize - 4);
+      context.lineTo(boxSize - 3, boxY + 4);
+      context.stroke();
+      context.lineCap = 'butt';
+      context.lineJoin = 'miter';
+    }
+
+    // Label
+    const text = String(this.text ?? '');
+    if (text) {
+      const font = Theme.font;
+      context.font = `${font.bold ? 'bold ' : ''}${font.pixelSize}px ${font.family}`;
+      context.fillStyle = this.enabled ? p.text : p.disabledText;
+      context.textBaseline = 'middle';
+      context.fillText(text, boxSize + 8, h / 2);
+      context.textBaseline = 'top';
+    }
+  }
+}
+
 const runtimeExports = {
   Signal,
   Binding,
@@ -3034,6 +3619,13 @@ const runtimeExports = {
   Keys,
   TapHandler,
   DragHandler,
+  // Stage D: controls MVP
+  Theme,
+  Button,
+  Label,
+  TextField,
+  Slider,
+  CheckBox,
 };
 
 if (typeof module !== 'undefined' && module.exports) {

@@ -39,6 +39,138 @@ Runtime-only QML/QtQuick-like primitives for JavaScript.
   - `Keys` attached property: `Keys.onPressed` / `Keys.onReleased` handlers per item
   - `TapHandler` – pointer handler that emits `tapped` signal
   - `DragHandler` – pointer handler with pointer grabbing; `active`, `translation`, `dragTarget` properties
+- **Stage D: Controls MVP**
+  - `Theme` – global palette (`primary`, `text`, `border`, `disabled`, …) and font defaults
+  - `Button` – `text`, `enabled`, `hovered`, `pressed`; signals `clicked`, `released`; keyboard activation (Enter/Space); focus ring
+  - `Label` – `text`, `color`, `font`
+  - `TextField` – `text`, `placeholderText`; cursor; focus-required text input from key events; emits `textChanged`
+  - `Slider` – `from`, `to`, `value`, `stepSize`; drag interaction; keyboard arrows adjust value when focused
+  - `CheckBox` – `text`, `checked`; click/keyboard toggles; emits `clicked`
+  - All controls are focusable by default (`activeFocusOnTab: true`), auto-acquire focus on click
+
+## Stage D: Controls MVP
+
+### Theme
+
+The `Theme` singleton holds the default palette and font used by all controls.
+
+```js
+const { Theme } = require('jqml5');
+
+// Override individual palette values globally
+Theme.palette.primary = '#e74c3c';
+Theme.font.pixelSize = 16;
+```
+
+### Button
+
+```js
+const btn = new Button({ parentItem: root });
+btn.width = 120; btn.height = 40;
+btn.text = 'Click me';
+btn.clicked.connect(() => console.log('clicked'));
+btn.released.connect(() => console.log('released'));
+```
+
+Properties: `text`, `enabled`, `hovered` (read via poll), `pressed`  
+Signals: `clicked`, `released`  
+Keyboard: Enter / Space when the button has `activeFocus`
+
+QML:
+```qml
+Button {
+  width: 120; height: 40
+  text: "Save"
+  onClicked: { console.log("saved") }
+}
+```
+
+### Label
+
+```js
+const lbl = new Label({ text: 'Hello', color: '#333', font: { pixelSize: 16, bold: true } });
+```
+
+Properties: `text`, `color`, `font` (`pixelSize`, `bold`, `family`)
+
+QML:
+```qml
+Label {
+  x: 20; y: 10
+  text: "Status: " + model.status
+  color: "#1a1a2e"
+}
+```
+
+### TextField
+
+```js
+const tf = new TextField({ placeholderText: 'Enter name…' });
+tf.width = 200; tf.height = 36;
+tf.textChanged.connect((val) => console.log('text:', val));
+```
+
+Properties: `text`, `placeholderText`  
+Signals: `textChanged`  
+Requires `activeFocus` to accept keyboard input. Supports Backspace, Delete, ArrowLeft/Right, Home, End, and printable characters.
+
+QML:
+```qml
+TextField {
+  width: 240; height: 36
+  placeholderText: "Type here"
+  onTextChanged: { label.text = text }
+}
+```
+
+### Slider
+
+```js
+const s = new Slider({ from: 0, to: 100, value: 50, stepSize: 5 });
+s.width = 200; s.height = 24;
+s.valueChanged.connect((v) => console.log('value:', v));
+```
+
+Properties: `from`, `to`, `value`, `stepSize`  
+Drag the knob or press ArrowRight/ArrowUp (increase) and ArrowLeft/ArrowDown (decrease) when focused.
+
+QML:
+```qml
+Slider {
+  width: 300; height: 28
+  from: 0; to: 1; value: 0.5; stepSize: 0.1
+  onValueChanged: { label.text = Math.round(value * 100) + "%" }
+}
+```
+
+### CheckBox
+
+```js
+const cb = new CheckBox({ text: 'Enable feature', checked: false });
+cb.width = 160; cb.height = 24;
+cb.clicked.connect(() => console.log('checked:', cb.checked));
+```
+
+Properties: `text`, `checked`  
+Signals: `clicked` (emitted after each toggle)  
+Keyboard: Space / Enter toggles when focused.
+
+QML:
+```qml
+CheckBox {
+  width: 180; height: 28
+  text: "Auto-save"
+  checked: true
+  onClicked: { console.log("auto-save:", checked) }
+}
+```
+
+### Supported limitations
+
+- `Button.pressed` signal is omitted (use `pressedChanged` property change signal instead)
+- `TextField` cursor positioning on click places cursor at end (precise hit-testing requires canvas measurement context)
+- No text selection in `TextField` MVP
+- Hover state is not cleared when the pointer leaves without pressing; it clears on the next `up` event
 
 ## Stage C: Input / Focus / Keys
 
@@ -258,6 +390,13 @@ Output:
   - `TapHandler { onTapped: { ... } }` – tap gesture handler
   - `DragHandler { id: drag }` – drag gesture handler with pointer grabbing
   - Tab/Shift+Tab navigation handled automatically by Scene (canvas must have `tabindex="0"`)
+- **Stage D additions**
+  - `import QtQuick.Controls 2.15` resolved to `Button`, `Label`, `TextField`, `Slider`, `CheckBox`
+  - `Button { text: "OK"; onClicked: … }` – full signal handler support
+  - `TextField { placeholderText: "…"; onTextChanged: … }`
+  - `Slider { from: 0; to: 1; value: 0.5; stepSize: 0.1; onValueChanged: … }`
+  - `CheckBox { text: "Option"; checked: false; onClicked: … }`
+  - `Label { text: "…"; color: "…" }`
 
 > ⚠️ Security note: the compiler intentionally supports arbitrary JavaScript in bindings/handlers, so compile and run only trusted QML sources.
 
@@ -296,6 +435,12 @@ A Stage C input/focus/keys demo is under `examples/input-demo/`. Build it with:
 
 ```bash
 node ./tools/jqmlc/index.js ./examples/input-demo/Main.qml --outdir dist-input
+```
+
+A Stage D controls demo is under `examples/controls-demo/`. Build it with:
+
+```bash
+node ./tools/jqmlc/index.js ./examples/controls-demo/Main.qml --outdir dist-controls
 ```
 
 > The demo canvas needs `tabindex="0"` in the HTML so the canvas can receive keyboard events.
