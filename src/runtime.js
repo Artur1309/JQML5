@@ -573,6 +573,13 @@ class Item extends QtObject {
     this._anchors = null;
     this._anchorDisconnectors = [];
 
+    // States / transitions / behaviors
+    this._states = [];
+    this._transitions = [];
+    this._behaviors = new Map();
+    this._baseValues = new Map();
+    this._activeStateAnimations = [];
+
     this.defineProperty('x', 0);
     this.defineProperty('y', 0);
     this.defineProperty('width', 0);
@@ -583,6 +590,12 @@ class Item extends QtObject {
     this.defineProperty('enabled', true);
     this.defineProperty('opacity', 1);
     this.defineProperty('z', 0);
+
+    this.defineProperty('state', '', {
+      onChanged: (nextState, previousState) => {
+        this._applyState(nextState, previousState);
+      },
+    });
 
     this.defineProperty('parentItem', null, {
       onChanged: (nextValue, previousValue) => {
@@ -621,6 +634,159 @@ class Item extends QtObject {
     if (anchors) {
       this.setAnchors(anchors);
     }
+  }
+
+  // -----------------------------------------------------------------------
+  // States & transitions
+  // -----------------------------------------------------------------------
+
+  addState(stateObj) {
+    if (stateObj instanceof State) {
+      this._states.push(stateObj);
+    }
+  }
+
+  addTransition(transitionObj) {
+    if (transitionObj instanceof Transition) {
+      this._transitions.push(transitionObj);
+    }
+  }
+
+  _findStateByName(name) {
+    return this._states.find((s) => s.name === name) ?? null;
+  }
+
+  _findTransition(from, to) {
+    return this._transitions.find((t) => t._matches(from, to)) ?? null;
+  }
+
+  _applyState(nextStateName, previousStateName) {
+    // Stop any currently running state-transition animations
+    for (const anim of this._activeStateAnimations) {
+      anim.stop();
+    }
+    this._activeStateAnimations = [];
+
+    const nextState = this._findStateByName(nextStateName);
+    const prevState = this._findStateByName(previousStateName);
+
+    // Collect all (target, property) pairs affected by the next state
+    const affected = [];
+    if (nextState) {
+      for (const pc of nextState.propertyChanges) {
+        const target = pc.target;
+        if (!target) continue;
+        for (const propName of Object.keys(pc.changes)) {
+          affected.push({ target, propName, toValue: pc.changes[propName] });
+        }
+      }
+    }
+
+    // Save base values for properties we haven't saved yet
+    for (const { target, propName, toValue: _toValue } of affected) {
+      const key = `${target._objectId}:${propName}`;
+      if (!this._baseValues.has(key)) {
+        this._baseValues.set(key, target[propName]);
+      }
+    }
+
+    // Restore base values for the properties that were changed by the previous state
+    if (prevState) {
+      for (const pc of prevState.propertyChanges) {
+        const target = pc.target;
+        if (!target) continue;
+        for (const propName of Object.keys(pc.changes)) {
+          const key = `${target._objectId}:${propName}`;
+          if (this._baseValues.has(key)) {
+            target[propName] = this._baseValues.get(key);
+          }
+        }
+      }
+    }
+
+    if (!nextState) return;
+
+    // Find a matching transition
+    const transition = this._findTransition(previousStateName, nextStateName);
+
+    if (transition && transition.animations.length > 0) {
+      // Run transition animations towards the target values
+      for (const { target, propName, toValue } of affected) {
+        const fromValue = target[propName];
+
+        // Try to find an existing animation in the transition that matches
+        // target/property, or use the first applicable one
+        let anim = transition.animations.find(
+          (a) =>
+            (a instanceof NumberAnimation || a instanceof ColorAnimation) &&
+            ((!a.target || a.target === target) && (!a.property || a.property === propName)),
+        ) ?? null;
+
+        if (anim) {
+          const animClone = _cloneAnimationForProperty(anim, target, propName, fromValue, toValue);
+          animClone.start();
+          this._activeStateAnimations.push(animClone);
+        } else {
+          // No matching animation — apply instantly
+          target[propName] = toValue;
+        }
+      }
+    } else {
+      // No transition: apply all PropertyChanges directly
+      for (const pc of nextState.propertyChanges) {
+        pc.apply();
+      }
+    }
+  }
+
+  // -----------------------------------------------------------------------
+  // Behaviors
+  // -----------------------------------------------------------------------
+
+  addBehavior(propertyName, behavior) {
+    const existing = this._behaviors.get(propertyName);
+    if (existing && existing !== behavior) {
+      if (existing._animation) existing._animation.stop();
+    }
+    this._behaviors.set(propertyName, behavior);
+  }
+
+  removeBehavior(propertyName) {
+    const behavior = this._behaviors.get(propertyName);
+    if (behavior) {
+      if (behavior._animation) behavior._animation.stop();
+      this._behaviors.delete(propertyName);
+    }
+  }
+
+  // Override _assignProperty to allow behaviors to intercept plain-value assignments
+  _assignProperty(name, rawValue, options = {}) {
+    const binding = Binding.from(rawValue);
+    if (!binding && this._behaviors) {
+      // `Behavior` may be defined later in the file but method bodies are evaluated lazily
+      // eslint-disable-next-line no-use-before-define
+      const behavior = this._behaviors.get(name);
+      if (behavior && !behavior._animating) {
+        const currentValue = this._propertyValues.get(name);
+        if (!Object.is(currentValue, rawValue)) {
+          behavior._startAnimation(this, name, currentValue, rawValue);
+          return;
+        }
+      }
+    }
+    super._assignProperty(name, rawValue, options);
+  }
+
+  destroy() {
+    for (const behavior of this._behaviors.values()) {
+      if (behavior._animation) behavior._animation.stop();
+    }
+    this._behaviors.clear();
+    for (const anim of this._activeStateAnimations) {
+      anim.stop();
+    }
+    this._activeStateAnimations = [];
+    super.destroy();
   }
 
   setAnchors(anchors = null) {
@@ -1041,6 +1207,665 @@ class Loader extends Item {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Easing functions
+// ---------------------------------------------------------------------------
+
+const Easing = {
+  Linear: (t) => t,
+  InQuad: (t) => t * t,
+  OutQuad: (t) => t * (2 - t),
+  InOutQuad: (t) => (t < 0.5 ? 2 * t * t : -1 + (4 - 2 * t) * t),
+  InCubic: (t) => t * t * t,
+  OutCubic: (t) => { const s = t - 1; return s * s * s + 1; },
+  InOutCubic: (t) => (t < 0.5 ? 4 * t * t * t : (t - 1) * (2 * t - 2) * (2 * t - 2) + 1),
+  InSine: (t) => 1 - Math.cos((t * Math.PI) / 2),
+  OutSine: (t) => Math.sin((t * Math.PI) / 2),
+  InOutSine: (t) => -(Math.cos(Math.PI * t) - 1) / 2,
+  InExpo: (t) => (t === 0 ? 0 : Math.pow(2, 10 * t - 10)),
+  OutExpo: (t) => (t === 1 ? 1 : 1 - Math.pow(2, -10 * t)),
+};
+
+function _resolveEasing(easing) {
+  if (typeof easing === 'function') return easing;
+  if (typeof easing === 'string' && Object.prototype.hasOwnProperty.call(Easing, easing)) {
+    return Easing[easing];
+  }
+  return Easing.Linear;
+}
+
+// ---------------------------------------------------------------------------
+// AnimationTicker
+// ---------------------------------------------------------------------------
+
+class AnimationTicker {
+  constructor() {
+    this._animations = new Set();
+    this._running = false;
+    this._rafHandle = null;
+    this._lastTime = null;
+    this._useRaf = typeof requestAnimationFrame === 'function';
+  }
+
+  add(animation) {
+    this._animations.add(animation);
+    if (!this._running) {
+      this._scheduleFrame();
+    }
+  }
+
+  remove(animation) {
+    this._animations.delete(animation);
+  }
+
+  advance(dt) {
+    for (const anim of [...this._animations]) {
+      anim._tick(dt);
+    }
+  }
+
+  _scheduleFrame() {
+    if (this._running) return;
+    this._running = true;
+    this._lastTime = null;
+
+    const tick = (time) => {
+      if (!this._running) return;
+
+      if (this._lastTime === null) this._lastTime = time;
+      const dt = time - this._lastTime;
+      this._lastTime = time;
+
+      this.advance(dt);
+
+      if (this._animations.size > 0) {
+        if (this._useRaf) {
+          this._rafHandle = requestAnimationFrame(tick);
+        } else {
+          this._rafHandle = setTimeout(() => tick(Date.now()), 16);
+        }
+      } else {
+        this._running = false;
+        this._rafHandle = null;
+      }
+    };
+
+    if (this._useRaf) {
+      this._rafHandle = requestAnimationFrame(tick);
+    } else {
+      this._rafHandle = setTimeout(() => tick(Date.now()), 16);
+    }
+  }
+
+  stop() {
+    this._running = false;
+    if (this._rafHandle !== null) {
+      if (this._useRaf) {
+        cancelAnimationFrame(this._rafHandle);
+      } else {
+        clearTimeout(this._rafHandle);
+      }
+      this._rafHandle = null;
+    }
+    this._lastTime = null;
+  }
+}
+
+const _globalTicker = new AnimationTicker();
+
+// ---------------------------------------------------------------------------
+// Animation base class
+// ---------------------------------------------------------------------------
+
+class Animation extends QObject {
+  constructor(options = {}) {
+    super();
+
+    this._ticker = options.ticker || _globalTicker;
+    this._elapsed = 0;
+    this._loopsDone = 0;
+    this._started = false;
+
+    this.defineProperty('running', false);
+    this.defineProperty('loops', options.loops ?? 1);
+    this.defineProperty('duration', options.duration ?? 250);
+    this.defineSignal('started');
+    this.defineSignal('stopped');
+    this.defineSignal('finished');
+  }
+
+  _setRunning(value) {
+    const def = this._propertyDefinitions.get('running');
+    const prev = def.readOnly;
+    def.readOnly = false;
+    this.running = value;
+    def.readOnly = prev;
+  }
+
+  start() {
+    if (this._started) return;
+    this._elapsed = 0;
+    this._loopsDone = 0;
+    this._started = true;
+    this._onStart();
+    this._setRunning(true);
+    this._ticker.add(this);
+    this.started.emit();
+  }
+
+  stop() {
+    if (!this._started) return;
+    this._started = false;
+    this._ticker.remove(this);
+    this._setRunning(false);
+    this.stopped.emit();
+  }
+
+  _onStart() {}
+
+  _tick(dt) {
+    if (!this._started) return;
+
+    const dur = Math.max(1, this.duration);
+    this._elapsed += dt;
+    const progress = Math.min(1, this._elapsed / dur);
+
+    this._applyProgress(progress);
+
+    if (this._elapsed >= dur) {
+      this._loopsDone += 1;
+      const loops = this.loops;
+      if (loops !== -1 && this._loopsDone >= loops) {
+        this._applyProgress(1);
+        this._started = false;
+        this._ticker.remove(this);
+        this._setRunning(false);
+        this.finished.emit();
+      } else {
+        this._elapsed -= dur;
+        this._applyProgress(0);
+      }
+    }
+  }
+
+  _applyProgress(_progress) {}
+
+  destroy() {
+    this.stop();
+    super.destroy();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// NumberAnimation
+// ---------------------------------------------------------------------------
+
+class NumberAnimation extends Animation {
+  constructor(options = {}) {
+    super(options);
+
+    this._fromValue = null;
+
+    this.defineProperty('target', options.target ?? null);
+    this.defineProperty('property', options.property ?? '');
+    this.defineProperty('from', options.from ?? null);
+    this.defineProperty('to', options.to ?? 0);
+    this.defineProperty('easing', options.easing ?? 'Linear');
+  }
+
+  _onStart() {
+    const capturedFrom = this.from;
+    if (capturedFrom !== null && capturedFrom !== undefined) {
+      this._fromValue = capturedFrom;
+    } else if (this.target && this.property) {
+      this._fromValue = this.target[this.property] ?? 0;
+    } else {
+      this._fromValue = 0;
+    }
+  }
+
+  _applyProgress(progress) {
+    const target = this.target;
+    const prop = this.property;
+    if (!target || !prop) return;
+
+    const easingFn = _resolveEasing(this.easing);
+    const t = easingFn(progress);
+    const fromV = this._fromValue ?? 0;
+    const toV = this.to;
+    target[prop] = fromV + (toV - fromV) * t;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// ColorAnimation
+// ---------------------------------------------------------------------------
+
+function _parseColor(color) {
+  if (typeof color !== 'string') return { r: 0, g: 0, b: 0, a: 1 };
+  const hex = color.trim();
+  if (hex.startsWith('#')) {
+    const h = hex.slice(1);
+    let r, g, b, a = 255;
+    if (h.length === 3) {
+      r = parseInt(h[0] + h[0], 16);
+      g = parseInt(h[1] + h[1], 16);
+      b = parseInt(h[2] + h[2], 16);
+    } else if (h.length === 6) {
+      r = parseInt(h.slice(0, 2), 16);
+      g = parseInt(h.slice(2, 4), 16);
+      b = parseInt(h.slice(4, 6), 16);
+    } else if (h.length === 8) {
+      a = parseInt(h.slice(0, 2), 16);
+      r = parseInt(h.slice(2, 4), 16);
+      g = parseInt(h.slice(4, 6), 16);
+      b = parseInt(h.slice(6, 8), 16);
+    }
+    return { r: r / 255, g: g / 255, b: b / 255, a: a / 255 };
+  }
+  return { r: 0, g: 0, b: 0, a: 1 };
+}
+
+function _colorToHex(c) {
+  const toByte = (v) => Math.round(Math.max(0, Math.min(1, v)) * 255);
+  const r = toByte(c.r).toString(16).padStart(2, '0');
+  const g = toByte(c.g).toString(16).padStart(2, '0');
+  const b = toByte(c.b).toString(16).padStart(2, '0');
+  return `#${r}${g}${b}`;
+}
+
+class ColorAnimation extends Animation {
+  constructor(options = {}) {
+    super(options);
+
+    this._fromParsed = null;
+    this._toParsed = null;
+
+    this.defineProperty('target', options.target ?? null);
+    this.defineProperty('property', options.property ?? 'color');
+    this.defineProperty('from', options.from ?? null);
+    this.defineProperty('to', options.to ?? '#000000');
+    this.defineProperty('easing', options.easing ?? 'Linear');
+  }
+
+  _onStart() {
+    const capturedFrom = this.from;
+    if (capturedFrom !== null && capturedFrom !== undefined) {
+      this._fromParsed = _parseColor(capturedFrom);
+    } else if (this.target && this.property) {
+      this._fromParsed = _parseColor(this.target[this.property] ?? '#000000');
+    } else {
+      this._fromParsed = { r: 0, g: 0, b: 0, a: 1 };
+    }
+    this._toParsed = _parseColor(this.to);
+  }
+
+  _applyProgress(progress) {
+    const target = this.target;
+    const prop = this.property;
+    if (!target || !prop || !this._fromParsed || !this._toParsed) return;
+
+    const easingFn = _resolveEasing(this.easing);
+    const t = easingFn(progress);
+    const lerp = (a, b) => a + (b - a) * t;
+    const result = {
+      r: lerp(this._fromParsed.r, this._toParsed.r),
+      g: lerp(this._fromParsed.g, this._toParsed.g),
+      b: lerp(this._fromParsed.b, this._toParsed.b),
+      a: lerp(this._fromParsed.a, this._toParsed.a),
+    };
+    target[prop] = _colorToHex(result);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// SequentialAnimation / ParallelAnimation
+// ---------------------------------------------------------------------------
+
+class SequentialAnimation extends Animation {
+  constructor(options = {}) {
+    super(options);
+    this._children = options.animations ? [...options.animations] : [];
+    this._currentIndex = 0;
+    this._totalDuration = 0;
+  }
+
+  addAnimation(anim) {
+    this._children.push(anim);
+  }
+
+  _onStart() {
+    this._currentIndex = 0;
+    this._totalDuration = this._children.reduce((sum, a) => sum + (a.duration || 0), 0);
+    for (const child of this._children) {
+      child._ticker = { add: () => {}, remove: () => {} };
+    }
+  }
+
+  _tick(dt) {
+    if (!this._started) return;
+
+    if (this._children.length === 0) {
+      this._finishLoop();
+      return;
+    }
+
+    let remaining = dt;
+    while (remaining > 0 && this._currentIndex < this._children.length) {
+      const child = this._children[this._currentIndex];
+      if (!child._started) {
+        child._elapsed = 0;
+        child._loopsDone = 0;
+        child._started = true;
+        child._onStart();
+      }
+
+      const childDur = Math.max(1, child.duration);
+      const spaceLeft = childDur - child._elapsed;
+      const consume = Math.min(remaining, spaceLeft);
+      remaining -= consume;
+      child._elapsed += consume;
+
+      const progress = Math.min(1, child._elapsed / childDur);
+      child._applyProgress(progress);
+
+      if (child._elapsed >= childDur) {
+        child._applyProgress(1);
+        child._started = false;
+        this._currentIndex += 1;
+      } else {
+        break;
+      }
+    }
+
+    if (this._currentIndex >= this._children.length) {
+      this._finishLoop();
+    }
+  }
+
+  _finishLoop() {
+    this._loopsDone += 1;
+    const loops = this.loops;
+    if (loops !== -1 && this._loopsDone >= loops) {
+      this._started = false;
+      this._ticker.remove(this);
+      this._setRunning(false);
+      this.finished.emit();
+    } else {
+      this._currentIndex = 0;
+      for (const child of this._children) {
+        child._elapsed = 0;
+        child._started = false;
+      }
+    }
+  }
+
+  destroy() {
+    for (const child of this._children) {
+      child.destroy();
+    }
+    this._children = [];
+    super.destroy();
+  }
+}
+
+class ParallelAnimation extends Animation {
+  constructor(options = {}) {
+    super(options);
+    this._children = options.animations ? [...options.animations] : [];
+  }
+
+  addAnimation(anim) {
+    this._children.push(anim);
+  }
+
+  _onStart() {
+    this._totalDuration = 0;
+    for (const child of this._children) {
+      child._ticker = { add: () => {}, remove: () => {} };
+      child._elapsed = 0;
+      child._loopsDone = 0;
+      child._started = true;
+      child._onStart();
+      if (child.duration > this._totalDuration) {
+        this._totalDuration = child.duration;
+      }
+    }
+    const def = this._propertyDefinitions.get('duration');
+    if (def) {
+      const prevRO = def.readOnly;
+      def.readOnly = false;
+      this.duration = this._totalDuration || 1;
+      def.readOnly = prevRO;
+    }
+  }
+
+  _applyProgress(progress) {
+    for (const child of this._children) {
+      const childDur = Math.max(1, child.duration);
+      const childProgress = Math.min(1, (progress * this.duration) / childDur);
+      child._applyProgress(childProgress);
+    }
+  }
+
+  destroy() {
+    for (const child of this._children) {
+      child.destroy();
+    }
+    this._children = [];
+    super.destroy();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// PropertyChanges
+// ---------------------------------------------------------------------------
+
+class PropertyChanges extends QObject {
+  constructor(options = {}) {
+    super();
+    this.target = options.target ?? null;
+    this._changes = {};
+
+    for (const [key, value] of Object.entries(options)) {
+      if (key !== 'target') {
+        this._changes[key] = value;
+      }
+    }
+  }
+
+  addChange(name, value) {
+    this._changes[name] = value;
+  }
+
+  get changes() {
+    return { ...this._changes };
+  }
+
+  apply(target) {
+    const t = target || this.target;
+    if (!t) return;
+    for (const [name, value] of Object.entries(this._changes)) {
+      if (t._propertyDefinitions && t._propertyDefinitions.has(name)) {
+        t[name] = value;
+      } else if (typeof t[name] !== 'undefined') {
+        t[name] = value;
+      }
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// State
+// ---------------------------------------------------------------------------
+
+class State extends QObject {
+  constructor(options = {}) {
+    super();
+    this.name = options.name ?? '';
+    this.when = options.when ?? null;
+    this._propertyChanges = [];
+
+    if (Array.isArray(options.changes)) {
+      for (const pc of options.changes) {
+        this.addPropertyChanges(pc);
+      }
+    }
+  }
+
+  addPropertyChanges(pc) {
+    if (pc instanceof PropertyChanges) {
+      this._propertyChanges.push(pc);
+    }
+  }
+
+  get propertyChanges() {
+    return [...this._propertyChanges];
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Transition
+// ---------------------------------------------------------------------------
+
+class Transition extends QObject {
+  constructor(options = {}) {
+    super();
+    this.from = options.from ?? '*';
+    this.to = options.to ?? '*';
+    this._animations = [];
+
+    if (Array.isArray(options.animations)) {
+      for (const anim of options.animations) {
+        this.addAnimation(anim);
+      }
+    }
+  }
+
+  addAnimation(anim) {
+    if (anim instanceof Animation) {
+      this._animations.push(anim);
+    }
+  }
+
+  get animations() {
+    return [...this._animations];
+  }
+
+  _matches(from, to) {
+    const matchFrom = this.from === '*' || this.from === '' || this.from === from;
+    const matchTo = this.to === '*' || this.to === '' || this.to === to;
+    return matchFrom && matchTo;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Behavior – intercepts property assignments and animates to the new value
+// ---------------------------------------------------------------------------
+
+class Behavior extends QObject {
+  constructor(options = {}) {
+    super();
+    this._animation = options.animation ?? null;
+    this._animating = false;
+  }
+
+  setAnimation(anim) {
+    this._animation = anim;
+  }
+
+  _startAnimation(target, propName, fromValue, toValue) {
+    const anim = this._animation;
+    if (!anim) {
+      // No animation – apply value directly
+      target._propertyValues.set(propName, toValue);
+      target.signal(`${propName}Changed`).emit(toValue, fromValue);
+      return;
+    }
+
+    anim.stop();
+    anim.target = target;
+    anim.property = propName;
+
+    if (anim instanceof NumberAnimation) {
+      anim._fromValue = typeof fromValue === 'number' ? fromValue : 0;
+      const def = anim._propertyDefinitions.get('to');
+      if (def) {
+        const prevRO = def.readOnly;
+        def.readOnly = false;
+        anim.to = typeof toValue === 'number' ? toValue : 0;
+        def.readOnly = prevRO;
+      }
+    } else if (anim instanceof ColorAnimation) {
+      anim._fromParsed = _parseColor(typeof fromValue === 'string' ? fromValue : '#000000');
+      anim._toParsed = _parseColor(typeof toValue === 'string' ? toValue : '#000000');
+    } else {
+      // Unsupported animation type for behavior – apply directly
+      target._propertyValues.set(propName, toValue);
+      target.signal(`${propName}Changed`).emit(toValue, fromValue);
+      return;
+    }
+
+    this._animating = true;
+
+    const onDone = () => {
+      anim.finished.disconnect(onDone);
+      anim.stopped.disconnect(onDone);
+      this._animating = false;
+    };
+    anim.finished.connect(onDone);
+    anim.stopped.connect(onDone);
+
+    anim.start();
+  }
+
+  destroy() {
+    if (this._animation) {
+      this._animation.stop();
+    }
+    this._animating = false;
+    super.destroy();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Internal helper – clone an animation template for a specific target/property
+// ---------------------------------------------------------------------------
+
+function _cloneAnimationForProperty(templateAnim, target, propName, fromValue, toValue) {
+  const ticker = templateAnim._ticker || _globalTicker;
+  let clone;
+
+  if (templateAnim instanceof NumberAnimation) {
+    clone = new NumberAnimation({
+      ticker,
+      target,
+      property: propName,
+      from: fromValue,
+      to: toValue,
+      duration: templateAnim.duration,
+      easing: templateAnim.easing,
+      loops: templateAnim.loops,
+    });
+    clone._fromValue = fromValue;
+  } else if (templateAnim instanceof ColorAnimation) {
+    clone = new ColorAnimation({
+      ticker,
+      target,
+      property: propName,
+      from: typeof fromValue === 'string' ? fromValue : null,
+      to: typeof toValue === 'string' ? toValue : templateAnim.to,
+      duration: templateAnim.duration,
+      easing: templateAnim.easing,
+      loops: templateAnim.loops,
+    });
+  } else {
+    clone = templateAnim;
+  }
+
+  return clone;
+}
+
 class Rectangle extends Item {
   constructor(options = {}) {
     super(options);
@@ -1377,6 +2202,19 @@ const runtimeExports = {
   Scene,
   Rectangle,
   MouseArea,
+  // Stage A: animations
+  Easing,
+  AnimationTicker,
+  Animation,
+  NumberAnimation,
+  ColorAnimation,
+  SequentialAnimation,
+  ParallelAnimation,
+  // Stage A: states / transitions / behaviors
+  PropertyChanges,
+  State,
+  Transition,
+  Behavior,
 };
 
 if (typeof module !== 'undefined' && module.exports) {

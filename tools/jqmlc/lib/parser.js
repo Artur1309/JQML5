@@ -114,6 +114,7 @@ function parseObject(tokenizer) {
     propertyDefinitions: [],
     signalHandlers: [],
     children: [],
+    behaviors: [], // Stage A: Behavior on <prop> declarations
   };
 
   while (!tokenizer.eof()) {
@@ -131,6 +132,37 @@ function parseObject(tokenizer) {
       const propertyDefinition = parsePropertyDefinition(tokenizer, itemLocation);
       objectNode.propertyDefinitions.push(propertyDefinition);
       consumeTerminator(tokenizer);
+      continue;
+    }
+
+    // Stage A: Behavior on <property> { ... }
+    if (token.value === 'Behavior') {
+      tokenizer.skipWhitespaceAndComments();
+      const checkpoint = tokenizer.location();
+      const nextToken = tokenizer.readIdentifier();
+      if (nextToken.value === 'on') {
+        tokenizer.skipWhitespaceAndComments();
+        const propName = tokenizer.readIdentifierPath();
+        tokenizer.skipWhitespaceAndComments();
+        // Expect the behavior block '{ AnimationType { ... } }'
+        tokenizer.expect('{', `Expected '{' after 'Behavior on ${propName.value}'.`);
+        tokenizer.skipWhitespaceAndComments({ preserveNewlines: false });
+        const animNode = parseObject(tokenizer);
+        tokenizer.skipWhitespaceAndComments({ preserveNewlines: false });
+        tokenizer.expect('}', `Expected '}' to close 'Behavior on ${propName.value}'.`);
+        objectNode.behaviors.push({
+          kind: 'BehaviorDeclaration',
+          property: propName.value,
+          animation: animNode,
+          location: itemLocation,
+        });
+        continue;
+      }
+      // Not 'Behavior on' — restore position and treat as a child type name
+      tokenizer.index = token.location.index;
+      tokenizer.line = token.location.line;
+      tokenizer.column = token.location.column;
+      objectNode.children.push(parseObject(tokenizer));
       continue;
     }
 
@@ -183,6 +215,56 @@ function parseObject(tokenizer) {
   return objectNode;
 }
 
+function parseArrayValue(tokenizer, propertyName = '') {
+  const location = tokenizer.location();
+  tokenizer.expect('[', "Expected '['.");
+  const items = [];
+
+  while (!tokenizer.eof()) {
+    tokenizer.skipWhitespaceAndComments({ preserveNewlines: false });
+    if (tokenizer.current() === ']') {
+      tokenizer.advance();
+      break;
+    }
+
+    // Each item can be an object declaration (Type { ... }) or a plain value
+    const checkpoint = tokenizer.location();
+    if (/[A-Za-z_]/.test(tokenizer.current())) {
+      const ident = tokenizer.readIdentifierPath();
+      tokenizer.skipWhitespaceAndComments();
+      if (tokenizer.current() === '{') {
+        tokenizer.index = checkpoint.index;
+        tokenizer.line = checkpoint.line;
+        tokenizer.column = checkpoint.column;
+        items.push({
+          kind: 'ObjectValue',
+          object: parseObject(tokenizer),
+          location: checkpoint,
+        });
+      } else {
+        // restore and parse as value
+        tokenizer.index = checkpoint.index;
+        tokenizer.line = checkpoint.line;
+        tokenizer.column = checkpoint.column;
+        items.push(parseValue(tokenizer, propertyName));
+      }
+    } else {
+      items.push(parseValue(tokenizer, propertyName));
+    }
+
+    tokenizer.skipWhitespaceAndComments({ preserveNewlines: false });
+    if (tokenizer.current() === ',') {
+      tokenizer.advance();
+    }
+  }
+
+  return {
+    kind: 'ArrayValue',
+    items,
+    location,
+  };
+}
+
 function parsePropertyDefinition(tokenizer, location) {
   tokenizer.skipWhitespaceAndComments();
   const propertyType = tokenizer.readIdentifierPath();
@@ -224,6 +306,11 @@ function parseValue(tokenizer, propertyName = '') {
       raw: str.raw,
       location: str.location,
     };
+  }
+
+  // Stage A: array literal [ item, item, ... ]
+  if (char === '[') {
+    return parseArrayValue(tokenizer, propertyName);
   }
 
   if (char === '{') {

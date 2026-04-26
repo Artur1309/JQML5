@@ -14,6 +14,18 @@ Runtime-only QML/QtQuick-like primitives for JavaScript.
 - Canvas scene runtime (`Scene`, `CanvasRenderer`)
 - Visual/event primitives (`Rectangle`, `MouseArea`)
 - Minimal anchors/layout helpers (`fill`, `centerIn`, edge anchors with margins)
+- **Stage A: States / Transitions / Animations**
+  - `Easing` functions (Linear, InQuad, OutQuad, InOutQuad, InCubic, OutCubic, InOutCubic, InSine, OutSine, InOutSine, InExpo, OutExpo)
+  - `AnimationTicker` – centralised RAF-based ticker; injectable mock for deterministic tests
+  - `Animation` base class with `start()`/`stop()`, `running`, `loops`, `duration`, signals
+  - `NumberAnimation` – animates a numeric property from/to with easing
+  - `ColorAnimation` – interpolates CSS hex colours
+  - `SequentialAnimation` / `ParallelAnimation` – composite animations
+  - `PropertyChanges` – holds target + property-value pairs
+  - `State` – named state with a list of `PropertyChanges`
+  - `Transition` – `from`/`to` pattern with animations for state changes
+  - `Behavior` – intercepts plain-value property assignments and animates to the new value
+  - `Item.state` property to activate states; `Item.addState()` / `Item.addTransition()` / `Item.addBehavior()` API
 
 ## Demo
 
@@ -47,6 +59,12 @@ Output:
 - `property <type> <name>: <value>` (minimal)
 - Signal handlers (`onXxx`) with arbitrary JavaScript (`{ ... }` blocks or expressions)
 - Bindings compiled to runtime `Binding` objects
+- **Stage A additions**
+  - `Behavior on <property> { AnimationType { ... } }` – attached behavior syntax
+  - `states: [ State { ... }, ... ]` – array of State objects
+  - `transitions: [ Transition { ... }, ... ]` – array of Transition objects
+  - `PropertyChanges { target: id; prop: value }` children auto-wired to parent `State`
+  - Animation children auto-wired to parent `Transition`, `SequentialAnimation`, `ParallelAnimation`
 
 > ⚠️ Security note: the compiler intentionally supports arbitrary JavaScript in bindings/handlers, so compile and run only trusted QML sources.
 
@@ -69,6 +87,12 @@ npm run build:example
 
 The example source is under `examples/qml-app/`.
 
+A dedicated Stage A demo is under `examples/states-demo/`. Build it with:
+
+```bash
+node ./tools/jqmlc/index.js ./examples/states-demo/Main.qml --outdir dist-states
+```
+
 Optional local development server with rebuild:
 
 ```bash
@@ -80,3 +104,4 @@ npm run dev:example
 ```bash
 npm test
 ```
+
