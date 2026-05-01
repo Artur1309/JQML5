@@ -7256,3 +7256,213 @@ test('ListView clear() triggers full rebuild and count resets to 0', () => {
 
   lv.destroy();
 });
+
+// ---------------------------------------------------------------------------
+// Stage F: Engine lifecycle & event loop parity
+// ---------------------------------------------------------------------------
+
+// A) Component.onCompleted – order and final property values
+
+test('Stage F: Component.onCompleted fires in post-order: children before parent', () => {
+  const { Component, Item } = require('../src/runtime');
+  const order = [];
+
+  const comp = new Component(({ parent: p }) => {
+    const root = new Item({ parentItem: p });
+    root.onCompleted = () => order.push('root');
+
+    const child1 = new Item({ parentItem: root });
+    child1.onCompleted = () => order.push('child1');
+
+    const child2 = new Item({ parentItem: root });
+    child2.onCompleted = () => order.push('child2');
+
+    return root;
+  });
+
+  const host = new Item();
+  comp.createObject(host);
+
+  // Qt post-order: innermost children first, then parent
+  assert.deepEqual(order, ['child1', 'child2', 'root']);
+});
+
+test('Stage F: Component.onCompleted sees final property values after bindings applied', () => {
+  const { Component, Item, Binding } = require('../src/runtime');
+  let seenWidth = null;
+
+  const comp = new Component(() => {
+    const root = new Item();
+    root.defineProperty('baseSize', 100);
+    root.width = new Binding(() => root.baseSize * 2);
+    root.onCompleted = () => { seenWidth = root.width; };
+    return root;
+  });
+
+  comp.createObject(null);
+
+  assert.equal(seenWidth, 200, 'onCompleted should see the bound (final) width value');
+});
+
+// A) Component.onDestruction
+
+test('Stage F: Component.onDestruction fires when object is destroyed', () => {
+  const { Item } = require('../src/runtime');
+  const events = [];
+
+  const item = new Item();
+  item.onDestruction = () => events.push('destroyed');
+
+  item.destroy();
+
+  assert.deepEqual(events, ['destroyed']);
+});
+
+test('Stage F: Component.onDestruction fires in pre-order: parent before children', () => {
+  const { Item } = require('../src/runtime');
+  const order = [];
+
+  const parent = new Item();
+  parent.onDestruction = () => order.push('parent');
+
+  const child1 = new Item({ parentItem: parent });
+  child1.onDestruction = () => order.push('child1');
+
+  const child2 = new Item({ parentItem: parent });
+  child2.onDestruction = () => order.push('child2');
+
+  parent.destroy();
+
+  // Qt pre-order: parent fires first, then children
+  assert.deepEqual(order, ['parent', 'child1', 'child2']);
+});
+
+test('Stage F: Component.onDestruction fires when Loader unloads its item', () => {
+  const { Item, Component, Loader } = require('../src/runtime');
+  const events = [];
+
+  const comp = new Component(({ parent: p }) => {
+    const item = new Item({ parentItem: p });
+    item.onDestruction = () => events.push('unloaded');
+    return item;
+  });
+
+  const loader = new Loader({ sourceComponent: comp });
+  assert.equal(loader.status, Loader.Ready);
+  assert.equal(events.length, 0, 'onDestruction should not fire before unload');
+
+  loader.active = false;
+  assert.deepEqual(events, ['unloaded'], 'onDestruction should fire when Loader unloads');
+});
+
+test('Stage F: Component.onDestruction fires only once even if destroy() is called twice', () => {
+  const { Item } = require('../src/runtime');
+  let count = 0;
+  const item = new Item();
+  item.onDestruction = () => { count += 1; };
+  item.destroy();
+  item.destroy(); // no-op
+  assert.equal(count, 1, 'onDestruction should fire exactly once');
+});
+
+// B) Qt.callLater – deferred execution
+
+test('Stage F: Qt.callLater runs the function after the current synchronous turn', async () => {
+  const { Qt } = require('../src/runtime');
+  const events = [];
+
+  events.push('before');
+  Qt.callLater(() => events.push('deferred'));
+  events.push('after');
+
+  // At this point the deferred call has not yet run
+  assert.deepEqual(events, ['before', 'after']);
+
+  // Await a microtask tick so the callLater callback is executed
+  await Promise.resolve();
+
+  assert.deepEqual(events, ['before', 'after', 'deferred']);
+});
+
+test('Stage F: Qt.callLater deduplicates: same function queued twice only runs once', async () => {
+  const { Qt } = require('../src/runtime');
+  let count = 0;
+  const fn = () => { count += 1; };
+
+  Qt.callLater(fn);
+  Qt.callLater(fn);
+  Qt.callLater(fn);
+
+  await Promise.resolve();
+
+  assert.equal(count, 1, 'callLater should coalesce duplicate calls to the same function');
+});
+
+test('Stage F: Qt.callLater passes arguments to the deferred function', async () => {
+  const { Qt } = require('../src/runtime');
+  let received = null;
+  Qt.callLater((a, b) => { received = [a, b]; }, 'hello', 42);
+  await Promise.resolve();
+  assert.deepEqual(received, ['hello', 42]);
+});
+
+test('Stage F: Qt.callLater last-wins for args when same fn queued multiple times', async () => {
+  const { Qt } = require('../src/runtime');
+  let received = null;
+  const fn = (...args) => { received = args; };
+  Qt.callLater(fn, 1);
+  Qt.callLater(fn, 2);
+  Qt.callLater(fn, 3);
+  await Promise.resolve();
+  assert.deepEqual(received, [3], 'last args should win for deduplicated callLater');
+});
+
+test('Stage F: Qt.callLater different functions both execute', async () => {
+  const { Qt } = require('../src/runtime');
+  const results = [];
+  Qt.callLater(() => results.push('a'));
+  Qt.callLater(() => results.push('b'));
+  await Promise.resolve();
+  assert.deepEqual(results.sort(), ['a', 'b']);
+});
+
+// C) Binding coalescing – prevent re-entrancy loops
+
+test('Stage F: Binding coalescing: chained bindings propagate correctly', () => {
+  const { QObject, Binding } = require('../src/runtime');
+  const obj = new QObject();
+  obj.defineProperty('x', 0);
+  obj.defineProperty('y', 0);
+  obj.defineProperty('z', 0);
+
+  // z depends on y, y depends on x – setting x should update both without error
+  obj.y = new Binding(() => obj.x + 1);
+  obj.z = new Binding(() => obj.y + 1);
+
+  assert.equal(obj.y, 1);
+  assert.equal(obj.z, 2);
+
+  obj.x = 10;
+
+  // After the change propagates, z should equal x + 2
+  assert.equal(obj.y, 11);
+  assert.equal(obj.z, 12, 'coalesced binding chain should propagate correctly');
+});
+
+test('Stage F: Binding coalescing: reactive bindings stay consistent after multiple updates', () => {
+  const { QObject, Binding } = require('../src/runtime');
+
+  const obj = new QObject();
+  obj.defineProperty('counter', 0);
+  obj.defineProperty('doubled', 0);
+
+  obj.doubled = new Binding(() => obj.counter * 2);
+
+  assert.equal(obj.doubled, 0);
+
+  obj.counter = 5;
+  assert.equal(obj.doubled, 10);
+
+  obj.counter = 7;
+  assert.equal(obj.doubled, 14, 'binding should stay reactive after multiple updates');
+});

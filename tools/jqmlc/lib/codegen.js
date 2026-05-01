@@ -360,12 +360,10 @@ const __ATTACHED_HANDLERS = {
   },
   'Component.onDestruction': function(object, valueNode, scopeState) {
     var _v = valueNode;
-    if (object && typeof object.connect === 'function') {
-      object.connect('destroyed', function() {
-        var hs = __createExecutionScope(object, scopeState, object.parentItem || object.parent, null);
-        return __runJs(_v, hs, object);
-      });
-    }
+    object.onDestruction = function() {
+      var hs = __createExecutionScope(object, scopeState, object.parentItem || object.parent, null);
+      return __runJs(_v, hs, object);
+    };
   },
   // Keys input handlers
   'Keys.onPressed': function(object, valueNode, scopeState) {

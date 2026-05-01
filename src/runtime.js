@@ -134,6 +134,15 @@ class QObject {
   static _bindingStack = [];
   static _nextObjectId = 0;
 
+  // ---------------------------------------------------------------------------
+  // Binding coalescing – deferred re-evaluations triggered during an active
+  // binding evaluation are queued and flushed once the evaluation depth
+  // returns to zero.  This prevents surprising re-entrancy loops while keeping
+  // synchronous (non-binding) property changes immediately reactive.
+  // ---------------------------------------------------------------------------
+  static _evaluationDepth = 0;
+  static _deferredEvaluations = new Map();
+
   static _recordPropertyRead(owner, propertyName) {
     const stack = QObject._bindingStack;
     if (!stack.length) {
@@ -314,7 +323,18 @@ class QObject {
       return;
     }
 
+    // If triggered during an active binding evaluation, defer to avoid
+    // re-entrancy loops (coalescing: only one pending entry per binding).
+    if (QObject._evaluationDepth > 0) {
+      const key = `${this._objectId}:${name}`;
+      if (!QObject._deferredEvaluations.has(key)) {
+        QObject._deferredEvaluations.set(key, { owner: this, name, state });
+      }
+      return;
+    }
+
     state.evaluating = true;
+    QObject._evaluationDepth += 1;
 
     for (const disconnect of state.dependencies.values()) {
       disconnect();
@@ -340,6 +360,16 @@ class QObject {
     } finally {
       QObject._bindingStack.pop();
       state.evaluating = false;
+      QObject._evaluationDepth -= 1;
+
+      // Flush deferred evaluations when the top-level binding finishes.
+      if (QObject._evaluationDepth === 0 && QObject._deferredEvaluations.size > 0) {
+        const deferred = new Map(QObject._deferredEvaluations);
+        QObject._deferredEvaluations.clear();
+        for (const { owner, name: propertyName, state: bindingState } of deferred.values()) {
+          owner._evaluateBinding(propertyName, bindingState);
+        }
+      }
     }
   }
 
@@ -497,6 +527,14 @@ class QObject {
     }
 
     this._destroying = true;
+
+    // Fire Component.onDestruction before children are destroyed (Qt pre-order
+    // semantics: the parent handler runs first, then children are cleaned up).
+    if (typeof this.onDestruction === 'function') {
+      try {
+        this.onDestruction.call(this);
+      } catch (_) { /* ignore errors in destruction handlers */ }
+    }
 
     for (const child of [...this._children]) {
       child.destroy();
@@ -1439,6 +1477,44 @@ const Qt = {
       'pass a compiled factory function instead.');
     return null;
   },
+
+  // ---------------------------------------------------------------------------
+  // Stage F: Qt.callLater – deferred, coalesced function invocation.
+  //
+  // Mirrors Qt 6 semantics:
+  //   • The function is called once after the current evaluation completes
+  //     (scheduled as a microtask via Promise.resolve().then).
+  //   • Multiple Qt.callLater(fn, …) calls with the same function reference
+  //     within the same synchronous turn collapse to a single invocation
+  //     (last-wins for the argument list, matching Qt's deduplication).
+  // ---------------------------------------------------------------------------
+  _callLaterQueue: new Map(),   // fn → args[]
+  _callLaterScheduled: false,
+
+  callLater(fn, ...args) {
+    if (typeof fn !== 'function') {
+      throw new TypeError('Qt.callLater: first argument must be a function.');
+    }
+    // Coalesce: override args for the same fn (last-wins).
+    Qt._callLaterQueue.set(fn, args);
+    if (!Qt._callLaterScheduled) {
+      Qt._callLaterScheduled = true;
+      Promise.resolve().then(() => {
+        Qt._callLaterScheduled = false;
+        const queue = new Map(Qt._callLaterQueue);
+        Qt._callLaterQueue.clear();
+        for (const [f, a] of queue) {
+          try {
+            f(...a);
+          } catch (err) {
+            // Mirror Qt: uncaught errors in callLater handlers are reported but
+            // do not prevent remaining handlers from running.
+            console.error('Qt.callLater: uncaught error in deferred call:', err);
+          }
+        }
+      });
+    }
+  },
 };
 
 class Loader extends Item {
@@ -1486,7 +1562,13 @@ class Loader extends Item {
     }
 
     this.connect('parentItemChanged', () => this._reload());
-    this._reload();
+
+    // Only trigger an initial reload if neither source property was provided in
+    // options (those setters already triggered _reload via onChanged handlers).
+    // This avoids a double-load / spurious unload cycle on construction.
+    if (!('source' in options) && !('sourceComponent' in options)) {
+      this._reload();
+    }
   }
 
   _setReadOnlyProp(name, value) {

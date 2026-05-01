@@ -9,7 +9,7 @@ Runtime-only QML/QtQuick-like primitives for JavaScript.
 - Hierarchical `Context`
 - Component id registry (`registerId`, `id`)
 - Alias properties (`defineAlias`)
-- `Component` + lifecycle completion (`onCompleted`, `completed` signal)
+- `Component` + lifecycle completion (`onCompleted`, `completed` signal); destruction hook (`onDestruction`)
 - `Loader`
 - Canvas scene runtime (`Scene`, `CanvasRenderer`)
 - Visual/event primitives (`Rectangle`, `MouseArea`, `Text`)
@@ -433,8 +433,8 @@ Output:
   - **Limitations**: `Layout.*` binding changes at runtime do not yet trigger a re-layout (initial value is applied); spanning items do not currently expand column/row tracks beyond single-span preferred sizes
 - **QML compatibility layer (attached properties, grouped blocks, enums)**
   - **Attached properties** – registry-driven dispatch via `__ATTACHED_HANDLERS` in `tools/jqmlc/lib/codegen.js`
-    - `Component.onCompleted: { … }` – handler runs after the component tree is fully created (correct `this` binding, QML id scope access)
-    - `Component.onDestruction: { … }` – handler fires when the object is destroyed
+    - `Component.onCompleted: { … }` – handler runs after the component tree is fully created (correct `this` binding, QML id scope access); fires in post-order (children before parent), matching Qt 6 semantics
+    - `Component.onDestruction: { … }` – handler fires when the object is about to be destroyed; fires in pre-order (parent before children), matching Qt 6 semantics; also fires when a `Loader` unloads its item
     - `Keys.onPressed: { … }` / `Keys.onReleased: { … }` / `Keys.onReturnPressed: { … }` / `Keys.onEscapePressed: { … }` – migrated to registry, same behaviour as before
     - `Layout.fillWidth: true` / `Layout.fillHeight: true` / `Layout.preferredWidth: N` / … – stored in `object.__layoutAttached` and acted on at runtime by `RowLayout`, `ColumnLayout`, and `GridLayout`
     - `import QtQuick.Layouts 1.15` is recognised; exports `RowLayout`, `ColumnLayout`, `GridLayout`
@@ -454,6 +454,17 @@ Output:
     - `Image.Stretch` / `Image.PreserveAspectFit` / `Image.PreserveAspectCrop` / `Image.Pad` / `Image.Tile`
     - `Qt.AlignLeft` / `Qt.AlignRight` / `Qt.AlignHCenter` / `Qt.AlignTop` / `Qt.AlignVCenter` / `Qt.AlignBottom`
     - _Extend:_ add new entries to `__ENUM_TABLE` in `codegen.js`
+- **Stage F: Engine lifecycle & event-loop parity (Qt 6.x)**
+  - **`Component.onCompleted`** – fires in post-order (children before parent) after the full component tree is created and all bindings have been applied. `onCompleted` therefore sees the _final_ bound property values, matching Qt 6 behaviour.
+  - **`Component.onDestruction`** – fires in pre-order (parent before children) when `destroy()` is called or when a `Loader` unloads its item. The handler is invoked before any children are destroyed, giving access to a still-valid object graph.
+  - **`Qt.callLater(fn, ...args)`** – defers `fn` to a microtask (after the current synchronous turn). Multiple calls with the same function reference within the same turn are coalesced into a single invocation; the last supplied args win. Matches Qt 6 `Qt.callLater` semantics. Example:
+    ```js
+    const refresh = () => console.log('refresh');
+    // Both calls coalesce – refresh() runs exactly once after the current turn:
+    Qt.callLater(refresh, 'attempt 1');
+    Qt.callLater(refresh, 'attempt 2'); // overwrites args; only this fires
+    ```
+  - **Binding coalescing** – binding re-evaluations that are triggered _during_ an active binding evaluation are deferred and flushed after the outermost evaluation completes. This prevents re-entrancy loops when bindings form a chain (A → B → C) while keeping synchronous property reactivity intact.
 - **Property-path rewrites** (anchors and border)
   - `anchors.fill: parent` / `anchors.centerIn: parent` and all edge+margin anchors compile to `setAnchors({…})` calls so the runtime applies geometry correctly.
   - Supported `anchors.*` keys: `fill`, `centerIn`, `left`, `right`, `top`, `bottom`, `margins`, `leftMargin`, `rightMargin`, `topMargin`, `bottomMargin`, `horizontalCenterOffset`, `verticalCenterOffset`.
