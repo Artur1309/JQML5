@@ -199,6 +199,8 @@ function generateComponentFactory(component, moduleIdMap) {
   output += `          childObj.destroy();\n`;
   output += `          continue;\n`;
   output += `        }\n`;
+  output += `        // Step C: Connections child – no extra wiring needed (self-contained)\n`;
+  output += `        // Step C: BindingElement child – self-contained; just created as a child\n`;
   output += `        // Stage A: wire State/PropertyChanges/Transition children to parent\n`;
   output += `        if (childObj instanceof __runtime.State && typeof object.addState === 'function') {\n`;
   output += `          object.addState(childObj);\n`;
@@ -563,6 +565,11 @@ const __ENUM_TABLE = {
   'TextArea.Wrap':        1,
   'TextArea.WordWrap':    2,
   'TextArea.WrapAnywhere': 3,
+  // Step C: Loader status constants
+  'Loader.Null':    0,
+  'Loader.Ready':   1,
+  'Loader.Loading': 2,
+  'Loader.Error':   3,
 };
 const __exprCache = new Map();
 function __compileExpression(code) {
