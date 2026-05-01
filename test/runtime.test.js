@@ -2882,8 +2882,229 @@ test('Text line cache is invalidated when text changes', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Stage F: TextInput tests
+// Stage E parity: ElideLeft, ElideMiddle, implicit sizing, layout propagation
 // ---------------------------------------------------------------------------
+
+test('Text ElideLeft truncates from left with ellipsis prefix', () => {
+  const fakeCtx = {
+    font: '',
+    measureText: (str) => ({ width: str.length * 8 }),
+    fillText: () => {},
+    fillStyle: '',
+    textBaseline: '',
+  };
+
+  const t = new Text({
+    text: 'Hello World',
+    font: { family: 'test', pixelSize: 12, bold: false },
+    elide: 'ElideLeft',
+  });
+  t.width = 40; // fits 5 chars
+
+  const lines = t._getLines(fakeCtx);
+  assert.equal(lines.length, 1);
+  assert.ok(lines[0].startsWith('\u2026'), `Expected leading ellipsis, got "${lines[0]}"`);
+  // '\u2026orld' = 5 chars * 8 = 40 <= 40
+  assert.ok(lines[0].length <= 5, `Line should be short: "${lines[0]}"`);
+});
+
+test('Text ElideMiddle truncates in the middle with ellipsis', () => {
+  const fakeCtx = {
+    font: '',
+    measureText: (str) => ({ width: str.length * 8 }),
+    fillText: () => {},
+    fillStyle: '',
+    textBaseline: '',
+  };
+
+  const t = new Text({
+    text: 'Hello World',
+    font: { family: 'test', pixelSize: 12, bold: false },
+    elide: 'ElideMiddle',
+  });
+  t.width = 56; // fits 7 chars total
+
+  const lines = t._getLines(fakeCtx);
+  assert.equal(lines.length, 1);
+  assert.ok(lines[0].includes('\u2026'), `Expected middle ellipsis, got "${lines[0]}"`);
+  assert.ok(!lines[0].startsWith('\u2026'), `Should not start with ellipsis: "${lines[0]}"`);
+  assert.ok(!lines[0].endsWith('\u2026'), `Should not end with ellipsis: "${lines[0]}"`);
+  // Total width must not exceed the constrained width
+  const totalW = lines[0].length * 8;
+  assert.ok(totalW <= 56, `Elided line width ${totalW} exceeds container width 56: "${lines[0]}"`);
+});
+
+test('Text ElideRight in NoWrap mode does not overflow container width (Qt-doc style)', () => {
+  const fakeCtx = {
+    font: '',
+    measureText: (str) => ({ width: str.length * 8 }),
+    fillText: () => {},
+    fillStyle: '',
+    textBaseline: '',
+  };
+
+  const t = new Text({
+    text: 'This is a long text that should be elided at the right side',
+    font: { family: 'test', pixelSize: 12, bold: false },
+    elide: 'ElideRight',
+  });
+  t.width = 120; // fits 15 chars
+
+  const lines = t._getLines(fakeCtx);
+  assert.equal(lines.length, 1, 'NoWrap with elide should produce exactly one line');
+  assert.ok(lines[0].endsWith('\u2026'), `Expected trailing ellipsis`);
+  // Verify it fits within the width (each char = 8px)
+  const lineW = lines[0].length * 8;
+  assert.ok(lineW <= 120, `Elided text width ${lineW} must not exceed container width 120`);
+});
+
+test('Text WordWrap in constrained width grows implicitHeight (Qt-doc style)', () => {
+  // Derived from Qt 6 docs: "If a Text item is constrained in width, WordWrap
+  // will cause implicitHeight to increase as more lines are needed."
+  const fakeCtx = {
+    font: '',
+    measureText: (str) => ({ width: str.length * 8 }),
+    fillText: () => {},
+    fillStyle: '',
+    textBaseline: '',
+  };
+
+  const t = new Text({
+    text: 'The quick brown fox',
+    font: { family: 'test', pixelSize: 14, bold: false },
+    wrapMode: 'WordWrap',
+  });
+
+  // Wide width: fits on one line
+  t.width = 200;
+  t._measure(fakeCtx);
+  const oneLineH = t.implicitHeight;
+  assert.equal(oneLineH, 14, 'Should be one line tall (14px pixelSize)');
+
+  // Narrow width forces wrapping to multiple lines
+  t.width = 48; // 6 chars * 8px = 48px, so each word fits but not "The quick"
+  t._measure(fakeCtx);
+  assert.ok(t.implicitHeight > oneLineH, `implicitHeight (${t.implicitHeight}) should grow beyond single-line height (${oneLineH}) when wrapping`);
+});
+
+test('Text WrapAnywhere in constrained width grows implicitHeight', () => {
+  const fakeCtx = {
+    font: '',
+    measureText: (str) => ({ width: str.length * 8 }),
+    fillText: () => {},
+    fillStyle: '',
+    textBaseline: '',
+  };
+
+  const t = new Text({
+    text: 'ABCDEFGHIJ',
+    font: { family: 'test', pixelSize: 10, bold: false },
+    wrapMode: 'WrapAnywhere',
+  });
+
+  t.width = 40; // 5 chars per line → 2 lines
+  t._measure(fakeCtx);
+  // 2 lines × 10px = 20px
+  assert.equal(t.implicitHeight, 20, `Expected 20px for 2 wrapped lines`);
+  // implicitWidth = max line width = 5*8 = 40
+  assert.equal(t.implicitWidth, 40);
+});
+
+test('ColumnLayout with Text child updates implicitHeight when text changes (Qt-doc style)', async () => {
+  // Derived from Qt 6 docs: a ColumnLayout whose child Text uses WordWrap
+  // should resize when the text content changes and updates implicitHeight.
+  const { ColumnLayout, Text } = require('../src/runtime');
+
+  const fakeCtx = {
+    font: '',
+    measureText: (str) => ({ width: str.length * 8 }),
+    fillText: () => {},
+    fillStyle: '',
+    textBaseline: '',
+  };
+
+  const col = new ColumnLayout();
+  col.spacing = 0;
+
+  const t = new Text({
+    font: { family: 'test', pixelSize: 16, bold: false },
+    wrapMode: 'WordWrap',
+    parentItem: col,
+  });
+  t.width = 80; // ~10 chars per line
+
+  // Short text → 1 line
+  t.text = 'Hi';
+  t._measure(fakeCtx); // implicitHeight = 16
+
+  await nextTick();
+  assert.equal(t.implicitHeight, 16, 'Short text: 1 line = 16px');
+  assert.equal(col.implicitHeight, 16, 'ColumnLayout should match single-line text height');
+
+  // Longer text that wraps → 2 lines
+  // 'Hello World': 'Hello'=5*8=40 ≤ 80, 'Hello World'=11*8=88 > 80 → 2 lines
+  t.text = 'Hello World';
+  t._measure(fakeCtx); // implicitHeight = 32
+
+  await nextTick();
+  assert.equal(t.implicitHeight, 32, 'Wrapped text: 2 lines = 32px');
+  assert.equal(col.implicitHeight, 32, 'ColumnLayout should reflect updated text implicitHeight');
+});
+
+test('RowLayout with Text child updates implicitWidth when text changes', async () => {
+  const { RowLayout, Text } = require('../src/runtime');
+
+  const fakeCtx = {
+    font: '',
+    measureText: (str) => ({ width: str.length * 8 }),
+    fillText: () => {},
+    fillStyle: '',
+    textBaseline: '',
+  };
+
+  const row = new RowLayout();
+  row.spacing = 0;
+
+  const t = new Text({
+    font: { family: 'test', pixelSize: 12, bold: false },
+    parentItem: row,
+  });
+
+  // Short text
+  t.text = 'Hi';
+  t._measure(fakeCtx); // implicitWidth = 2*8 = 16
+  await nextTick();
+  assert.equal(t.implicitWidth, 16);
+  assert.equal(row.implicitWidth, 16, 'RowLayout width should match text implicitWidth');
+
+  // Longer text
+  t.text = 'Hello World';
+  t._measure(fakeCtx); // implicitWidth = 11*8 = 88
+  await nextTick();
+  assert.equal(t.implicitWidth, 88);
+  assert.equal(row.implicitWidth, 88, 'RowLayout should update when text implicitWidth changes');
+});
+
+test('Text draw stores context for proactive re-measurement', () => {
+  let measureCalls = 0;
+  const fakeCtx = {
+    font: '',
+    measureText: (str) => { measureCalls++; return { width: str.length * 8 }; },
+    fillText: () => {},
+    fillStyle: '',
+    textBaseline: '',
+  };
+
+  const t = new Text({
+    text: 'Hello',
+    font: { family: 'test', pixelSize: 12, bold: false },
+  });
+
+  // After first draw, _lastCtx should be set
+  assert.equal(t._lastCtx, null, '_lastCtx should be null before first draw');
+  t.draw(fakeCtx);
+  assert.ok(t._lastCtx === fakeCtx, '_lastCtx should be set after draw');
+});
 
 test('TextInput typing appends characters and updates cursorPosition', () => {
   const ti = new TextInput({ blinkInterval: 0 });
