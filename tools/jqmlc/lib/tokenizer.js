@@ -331,7 +331,8 @@ class Tokenizer {
 
     const raw = this.source.slice(expressionStart, this.index).trim();
     if (!raw) {
-      this.error('Expected expression value.', start);
+      const found = this.eof() ? 'end of file' : `'${this.current()}'`;
+      this.error(`Expected expression value, found ${found}.`, start);
     }
 
     return {

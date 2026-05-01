@@ -1220,3 +1220,230 @@ Item {
   assert.equal(heightProp.value.kind, 'NumberValue');
   assert.equal(heightProp.value.value, 640);
 });
+
+// ---------------------------------------------------------------------------
+// Qt 6 syntax: inline object values for header/footer/highlight/delegate
+// ---------------------------------------------------------------------------
+
+test('parser: header/footer/highlight accept inline object values (Qt-style)', () => {
+  const ast = parseQml(`
+import QtQuick 2.15
+ListView {
+  header: Rectangle {
+    width: parent.width
+    height: 50
+    color: "#3498db"
+  }
+  footer: Item {
+    height: 40
+  }
+  highlight: Rectangle {
+    color: "#f0f0f0"
+    radius: 4
+  }
+  delegate: Rectangle {
+    height: 60
+  }
+}
+`, 'HeaderFooterHighlight.qml');
+
+  const props = ast.rootObject.properties;
+
+  const headerProp = props.find((p) => p.name === 'header');
+  assert.ok(headerProp, 'header property should exist');
+  assert.equal(headerProp.value.kind, 'ObjectValue');
+  assert.equal(headerProp.value.object.typeName, 'Rectangle');
+
+  const footerProp = props.find((p) => p.name === 'footer');
+  assert.ok(footerProp, 'footer property should exist');
+  assert.equal(footerProp.value.kind, 'ObjectValue');
+  assert.equal(footerProp.value.object.typeName, 'Item');
+
+  const highlightProp = props.find((p) => p.name === 'highlight');
+  assert.ok(highlightProp, 'highlight property should exist');
+  assert.equal(highlightProp.value.kind, 'ObjectValue');
+  assert.equal(highlightProp.value.object.typeName, 'Rectangle');
+
+  const delegateProp = props.find((p) => p.name === 'delegate');
+  assert.ok(delegateProp, 'delegate property should exist');
+  assert.equal(delegateProp.value.kind, 'ObjectValue');
+  assert.equal(delegateProp.value.object.typeName, 'Rectangle');
+});
+
+// ---------------------------------------------------------------------------
+// Qt 6 syntax: JS expression parsing robustness
+// ---------------------------------------------------------------------------
+
+test('parser: arithmetic expression "50 + index * 2" parses as JsExpressionValue', () => {
+  const ast = parseQml(`
+import QtQuick 2.15
+Rectangle {
+  height: 50 + index * 2
+}
+`, 'ArithmeticExpr.qml');
+
+  const heightProp = ast.rootObject.properties.find((p) => p.name === 'height');
+  assert.ok(heightProp, 'height property should exist');
+  assert.equal(heightProp.value.kind, 'JsExpressionValue');
+  assert.match(heightProp.value.raw, /50\s*\+\s*index\s*\*\s*2/);
+});
+
+test('parser: logical operators && || ! in bindings parse as JsExpressionValue', () => {
+  const ast = parseQml(`
+import QtQuick 2.15
+Item {
+  visible: a && b
+  enabled: c || d
+  checked: !flag
+}
+`, 'LogicalOps.qml');
+
+  const visibleProp = ast.rootObject.properties.find((p) => p.name === 'visible');
+  assert.ok(visibleProp, 'visible property should exist');
+  assert.equal(visibleProp.value.kind, 'JsExpressionValue');
+  assert.match(visibleProp.value.raw, /&&/);
+
+  const enabledProp = ast.rootObject.properties.find((p) => p.name === 'enabled');
+  assert.ok(enabledProp, 'enabled property should exist');
+  assert.equal(enabledProp.value.kind, 'JsExpressionValue');
+  assert.match(enabledProp.value.raw, /\|\|/);
+
+  const checkedProp = ast.rootObject.properties.find((p) => p.name === 'checked');
+  assert.ok(checkedProp, 'checked property should exist');
+  assert.equal(checkedProp.value.kind, 'JsExpressionValue');
+  assert.match(checkedProp.value.raw, /^!flag$/);
+});
+
+test('parser: comparison operators != <= >= in bindings parse as JsExpressionValue', () => {
+  const ast = parseQml(`
+import QtQuick 2.15
+Item {
+  visible: index != 0
+  opacity: count <= limit ? 1.0 : 0.5
+  active: score >= threshold
+}
+`, 'ComparisonOps.qml');
+
+  const visibleProp = ast.rootObject.properties.find((p) => p.name === 'visible');
+  assert.ok(visibleProp, 'visible property should exist');
+  assert.equal(visibleProp.value.kind, 'JsExpressionValue');
+  assert.match(visibleProp.value.raw, /!=/);
+
+  const opacityProp = ast.rootObject.properties.find((p) => p.name === 'opacity');
+  assert.ok(opacityProp, 'opacity property should exist');
+  assert.equal(opacityProp.value.kind, 'JsExpressionValue');
+  assert.match(opacityProp.value.raw, /<=/);
+  assert.match(opacityProp.value.raw, /\?/);
+
+  const activeProp = ast.rootObject.properties.find((p) => p.name === 'active');
+  assert.ok(activeProp, 'active property should exist');
+  assert.equal(activeProp.value.kind, 'JsExpressionValue');
+  assert.match(activeProp.value.raw, />=/);
+});
+
+test('parser: multi-line expression inside parens is not truncated at inner newlines', () => {
+  const ast = parseQml(`
+import QtQuick 2.15
+Item {
+  x: Qt.binding(function() {
+    return parent.width / 2
+  })
+}
+`, 'MultilineExpr.qml');
+
+  const xProp = ast.rootObject.properties.find((p) => p.name === 'x');
+  assert.ok(xProp, 'x property should exist');
+  assert.equal(xProp.value.kind, 'JsExpressionValue');
+  assert.match(xProp.value.raw, /Qt\.binding/);
+  assert.match(xProp.value.raw, /parent\.width/);
+});
+
+test('parser: delegate: Rectangle { Text { text: "Item" + index } } parses nested objects', () => {
+  const ast = parseQml(`
+import QtQuick 2.15
+ListView {
+  delegate: Rectangle {
+    Text { text: "Item" + index }
+  }
+}
+`, 'DelegateNested.qml');
+
+  const delegateProp = ast.rootObject.properties.find((p) => p.name === 'delegate');
+  assert.ok(delegateProp, 'delegate property should exist');
+  assert.equal(delegateProp.value.kind, 'ObjectValue');
+  assert.equal(delegateProp.value.object.typeName, 'Rectangle');
+
+  const textChild = delegateProp.value.object.children[0];
+  assert.ok(textChild, 'Text child should exist');
+  assert.equal(textChild.typeName, 'Text');
+
+  const textProp = textChild.properties.find((p) => p.name === 'text');
+  assert.ok(textProp, 'text property should exist');
+  assert.equal(textProp.value.kind, 'JsExpressionValue');
+  assert.match(textProp.value.raw, /"Item"\s*\+\s*index/);
+});
+
+test('compiler: full Qt 6-style ListView with header/footer/highlight and arithmetic delegate compiles', async () => {
+  const fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), 'jqmlc-qt6-listview-'));
+  const outdir = path.join(fixtureDir, 'out');
+  fs.mkdirSync(outdir, { recursive: true });
+
+  fs.writeFileSync(path.join(fixtureDir, 'Main.qml'), `
+import QtQuick 2.15
+
+Item {
+  width: 400
+  height: 600
+
+  ListView {
+    anchors.fill: parent
+    model: 20
+    spacing: 2
+
+    header: Rectangle {
+      width: parent.width
+      height: 50
+      color: "#3498db"
+    }
+
+    footer: Rectangle {
+      width: parent.width
+      height: 40
+      color: "#2c3e50"
+    }
+
+    highlight: Rectangle {
+      color: "#f0f0f0"
+      radius: 4
+    }
+
+    delegate: Rectangle {
+      width: parent.width
+      height: 50 + index * 2
+      color: (index % 2) == 0 ? "#ffffff" : "#f5f5f5"
+      Text {
+        text: "Item " + index
+        anchors.centerIn: parent
+      }
+    }
+  }
+}
+`, 'utf8');
+
+  const result = await compileQmlApplication({
+    entryFile: path.join(fixtureDir, 'Main.qml'),
+    outdir,
+  });
+
+  assert.equal(result.componentCount >= 1, true);
+  const js = fs.readFileSync(path.join(outdir, 'app.js'), 'utf8');
+
+  assert.match(js, /ListView/);
+  assert.match(js, /#3498db/);
+  assert.match(js, /#2c3e50/);
+  assert.match(js, /#f0f0f0/);
+  assert.match(js, /#ffffff/);
+  assert.match(js, /#f5f5f5/);
+  assert.match(js, /50 \+ index \* 2/);
+  assert.match(js, /Item/);
+});
