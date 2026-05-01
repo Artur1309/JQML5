@@ -8845,8 +8845,6 @@ TextArea.WordWrap   = 2;
 TextArea.WrapAnywhere = 3;
 
 const runtimeExports = {
-  // PR-B: Qt namespace constants
-  Qt,
   Signal,
   Binding,
   Context,
