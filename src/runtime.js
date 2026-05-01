@@ -5401,7 +5401,8 @@ class GridView extends Flickable {
     if (this._isRowFlow()) {
       return Math.ceil(count / this._columnsPerRow());
     }
-    // TopToBottom: each column has _rowsPerColumn rows; total rows = min(count, rows)
+    // TopToBottom: items fill fixed-height rows and create additional columns as needed.
+    // Content height only spans the rows actually used (min of count and row capacity).
     return Math.min(count, this._rowsPerColumn());
   }
 
@@ -5465,7 +5466,8 @@ class GridView extends Flickable {
 
       const firstRow = Math.max(0, Math.floor((scrollY - buffer) / rowStep));
       // A row is visible if its top edge is strictly before scrollY + viewH + buffer.
-      // Use ceil-based calculation so a row starting exactly at the boundary is excluded.
+      // Using ceil-based arithmetic ensures that a row whose top edge lands exactly
+      // on the viewport bottom boundary is NOT included, matching Qt GridView behaviour.
       const lastRowExclusive = Math.ceil((scrollY + viewH + buffer) / rowStep);
       const lastRow = Math.max(firstRow, lastRowExclusive - 1);
 

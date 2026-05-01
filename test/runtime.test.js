@@ -6459,7 +6459,7 @@ test('GridView model update (append) increases count and contentHeight', () => {
 
   model.append({ n: 3 });
   assert.equal(gv.count, 4);
-  // Still 1 row (4 items in 3 cols → still fits in rows differently; 4/3 = ceil → 2 rows)
+  // 4 items in 3 cols → ceil(4/3) = 2 rows
   assert.equal(gv.contentHeight, 200, '2 rows after 4 items with 3 cols');
 
   gv.destroy();

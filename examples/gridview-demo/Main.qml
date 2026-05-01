@@ -159,14 +159,6 @@ Item {
                     anchors.fill: parent
                     onClicked: ltrGrid.currentIndex = index
                 }
-
-                // Qt-like attached handlers (0 arguments, delegate reads own `index`)
-                GridView.onPooled: {
-                    console.log("[LTR] pooled index =", index)
-                }
-                GridView.onReused: {
-                    console.log("[LTR] reused index =", index)
-                }
             }
         }
     }
