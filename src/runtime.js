@@ -1368,6 +1368,39 @@ class Component {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Qt – namespace object with constants and utility helpers
+// ---------------------------------------------------------------------------
+
+const Qt = {
+  LeftEdge:   1,
+  RightEdge:  2,
+  TopEdge:    4,
+  BottomEdge: 8,
+  // Orientation
+  Horizontal: 1,
+  Vertical:   2,
+  // Alignment (mirrors codegen constants)
+  AlignLeft:    'left',
+  AlignRight:   'right',
+  AlignHCenter: 'center',
+  AlignTop:     'top',
+  AlignBottom:  'bottom',
+  AlignVCenter: 'vcenter',
+
+  // Step C: minimal Qt.createComponent helper (synchronous)
+  // Components can be pre-registered via Qt.registerComponent(url, component).
+  _componentRegistry: new Map(),
+
+  registerComponent(url, component) {
+    this._componentRegistry.set(url, component);
+  },
+
+  createComponent(url) {
+    return this._componentRegistry.get(url) ?? null;
+  },
+};
+
 class Loader extends Item {
   constructor(options = {}) {
     super(options);
@@ -1449,10 +1482,9 @@ class Loader extends Item {
       if (this.sourceComponent instanceof Component) {
         component = this.sourceComponent;
       } else if (this.source && typeof this.source === 'string') {
-        // Try Qt.createComponent if available (defined later in this file)
-        const _Qt = typeof Qt !== 'undefined' ? Qt : null; // eslint-disable-line no-use-before-define
-        if (_Qt && typeof _Qt.createComponent === 'function') {
-          component = _Qt.createComponent(this.source);
+        // Use Qt.createComponent if a component has been registered for this URL
+        if (typeof Qt.createComponent === 'function') {
+          component = Qt.createComponent(this.source);
         }
       }
 
@@ -8102,39 +8134,6 @@ class Overlay extends Item {
 }
 
 // ---------------------------------------------------------------------------
-// PR-B: Qt edge/side constants (used by Drawer and others)
-// ---------------------------------------------------------------------------
-
-const Qt = {
-  LeftEdge:   1,
-  RightEdge:  2,
-  TopEdge:    4,
-  BottomEdge: 8,
-  // Orientation
-  Horizontal: 1,
-  Vertical:   2,
-  // Alignment (mirrors codegen constants)
-  AlignLeft:    'left',
-  AlignRight:   'right',
-  AlignHCenter: 'center',
-  AlignTop:     'top',
-  AlignBottom:  'bottom',
-  AlignVCenter: 'vcenter',
-
-  // Step C: minimal Qt.createComponent helper (synchronous)
-  // Components can be pre-registered via Qt.registerComponent(url, component).
-  _componentRegistry: new Map(),
-
-  registerComponent(url, component) {
-    this._componentRegistry.set(url, component);
-  },
-
-  createComponent(url) {
-    return this._componentRegistry.get(url) ?? null;
-  },
-};
-
-// ---------------------------------------------------------------------------
 // PR-B: ComboBox – dropdown selection control
 // ---------------------------------------------------------------------------
 
@@ -9106,15 +9105,15 @@ class BindingElement extends QObject {
     const shouldBeActive = !!(this.when && this.target && this.property);
 
     if (shouldBeActive && !this._active) {
-      // Save the current value before we override it
-      try { this._savedValue = this.target[this.property]; } catch (_) { /* ignore */ }
+      // Save the current value before we override it (best-effort)
+      try { this._savedValue = this.target[this.property]; } catch (_e) { /* property may not be readable */ }
       this._active = true;
       this._applyIfActive();
     } else if (!shouldBeActive && this._active) {
       this._active = false;
       // Best-effort restore of the previous value
       if (this.target && this.property && this._savedValue !== undefined) {
-        try { this.target[this.property] = this._savedValue; } catch (_) { /* ignore */ }
+        try { this.target[this.property] = this._savedValue; } catch (_e) { /* property may be read-only */ }
       }
       this._savedValue = undefined;
     } else if (shouldBeActive) {
@@ -9127,12 +9126,12 @@ class BindingElement extends QObject {
     if (!this.target || !this.property) return;
     try {
       this.target[this.property] = this.value;
-    } catch (_) { /* ignore */ }
+    } catch (_e) { /* property may be read-only – best-effort application */ }
   }
 
   destroy() {
     if (this._active && this.target && this.property && this._savedValue !== undefined) {
-      try { this.target[this.property] = this._savedValue; } catch (_) { /* ignore */ }
+      try { this.target[this.property] = this._savedValue; } catch (_e) { /* property may be read-only */ }
     }
     super.destroy();
   }
