@@ -4697,10 +4697,10 @@ class ListView extends Flickable {
     this._disconnectModel();
     if (newModel instanceof ListModel) {
       this._modelDisconnectors.push(
-        newModel.rowsInserted.connect(() => this._rebuild()),
+        newModel.rowsInserted.connect((index, count) => this._onRowsInserted(index, count)),
       );
       this._modelDisconnectors.push(
-        newModel.rowsRemoved.connect(() => this._rebuild()),
+        newModel.rowsRemoved.connect((index, count) => this._onRowsRemoved(index, count)),
       );
       this._modelDisconnectors.push(
         newModel.rowsMoved.connect(() => this._rebuild()),
@@ -4710,6 +4710,81 @@ class ListView extends Flickable {
       );
     }
     this._rebuild();
+  }
+
+  // -----------------------------------------------------------------------
+  // Incremental model change handlers
+  // -----------------------------------------------------------------------
+
+  // Insert `insertCount` items at `index` without a full rebuild.
+  _onRowsInserted(index, insertCount) {
+    if (this._rebuilding) return;
+    // Disconnect all size listeners; they will be reconnected below.
+    for (let i = 0; i < this._sizeDisconnectors.length; i++) {
+      this._disconnectSizeListener(i);
+    }
+    this._sizeDisconnectors = [];
+
+    // Splice null slots into the delegate and size-cache arrays.
+    this._delegateItems.splice(index, 0, ...new Array(insertCount).fill(null));
+    this._sizeCache.splice(index, 0, ...new Array(insertCount).fill(undefined));
+
+    // Reconnect size listeners for items that remain in the array.
+    for (let i = 0; i < this._delegateItems.length; i++) {
+      if (this._delegateItems[i]) {
+        this._connectSizeListener(this._delegateItems[i], i);
+      }
+    }
+
+    this._buildPrefixSums();
+    this._setPropertyValue('count', _modelCount(this.model));
+    this._updateContentSize();
+    this._positionFooter();
+    this._positionAllVisible();
+    this._updateVirtualization();
+  }
+
+  // Remove `removeCount` items starting at `index` without a full rebuild.
+  _onRowsRemoved(index, removeCount) {
+    if (this._rebuilding) return;
+    // Disconnect all size listeners.
+    for (let i = 0; i < this._sizeDisconnectors.length; i++) {
+      this._disconnectSizeListener(i);
+    }
+    this._sizeDisconnectors = [];
+
+    // Pool or destroy the removed delegate items.
+    for (let i = index; i < index + removeCount; i++) {
+      const item = this._delegateItems[i];
+      if (item) {
+        if (this.reuseItems && this._reusePool.length < this._maxPoolSize) {
+          item.visible = false;
+          ListView._invokeAttachedHandler(item, 'onPooled');
+          this.pooled.emit(item, i);
+          this._reusePool.push(item);
+        } else {
+          item.destroy();
+        }
+      }
+    }
+
+    // Splice out the removed slots.
+    this._delegateItems.splice(index, removeCount);
+    this._sizeCache.splice(index, removeCount);
+
+    // Reconnect size listeners for the remaining items (indices shifted).
+    for (let i = 0; i < this._delegateItems.length; i++) {
+      if (this._delegateItems[i]) {
+        this._connectSizeListener(this._delegateItems[i], i);
+      }
+    }
+
+    this._buildPrefixSums();
+    this._setPropertyValue('count', _modelCount(this.model));
+    this._updateContentSize();
+    this._positionFooter();
+    this._positionAllVisible();
+    this._updateVirtualization();
   }
 
   // -----------------------------------------------------------------------
@@ -5189,6 +5264,603 @@ class ListView extends Flickable {
       hi.destroy();
       this._setPropertyValue('highlightItem', null);
     }
+    super.destroy();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Stage D: GridView – virtualized grid with pooling/reuse
+// ---------------------------------------------------------------------------
+
+class GridView extends Flickable {
+  constructor(options = {}) {
+    super(options);
+
+    this._delegateItems = [];        // sparse array of delegate instances
+    this._modelDisconnectors = [];
+    this._rebuilding = false;
+
+    // Header / footer item instances
+    this._headerItem = null;
+    this._footerItem = null;
+
+    // Reuse pool
+    this._reusePool = [];
+    this._maxPoolSize = 20;
+
+    this.defineProperty('model', null);
+    this.defineProperty('delegate', null);
+    // Cell dimensions (uniform, matching Qt GridView behaviour)
+    this.defineProperty('cellWidth', 100);
+    this.defineProperty('cellHeight', 100);
+    // Spacing between cells on both axes
+    this.defineProperty('spacing', 0);
+    this.defineProperty('cacheBuffer', 40);
+    this.defineProperty('reuseItems', false);
+
+    // flow: 'LeftToRight' (row-first, default) or 'TopToBottom' (column-first)
+    this.defineProperty('flow', 'LeftToRight');
+
+    // Header / footer components
+    this.defineProperty('header', null);
+    this.defineProperty('footer', null);
+
+    // Selection / current
+    this.defineProperty('currentIndex', -1);
+    this.defineProperty('currentItem', null);
+    this.defineProperty('highlight', null);
+    this.defineProperty('highlightItem', null);
+    this.defineProperty('highlightFollowsCurrentItem', true);
+
+    // Read-only count mirror
+    this.defineProperty('count', 0);
+
+    // Delegate reuse signals
+    this.defineSignal('pooled');
+    this.defineSignal('reused');
+
+    this.focusable = true;
+
+    // Wire up change listeners
+    this.connect('modelChanged', (newModel, oldModel) => this._onModelReplaced(newModel, oldModel));
+    this.connect('delegateChanged', () => this._rebuild());
+    this.connect('cellWidthChanged', () => this._rebuild());
+    this.connect('cellHeightChanged', () => this._rebuild());
+    this.connect('spacingChanged', () => this._rebuild());
+    this.connect('flowChanged', () => this._rebuild());
+    this.connect('contentYChanged', () => this._updateVirtualization());
+    this.connect('contentXChanged', () => this._updateVirtualization());
+    this.connect('heightChanged', () => this._rebuild());
+    this.connect('widthChanged', () => this._rebuild());
+    this.connect('currentIndexChanged', () => this._onCurrentIndexChanged());
+    this.connect('highlightChanged', () => this._onHighlightChanged());
+    this.connect('headerChanged', () => this._onHeaderFooterChanged('header'));
+    this.connect('footerChanged', () => this._onHeaderFooterChanged('footer'));
+
+    this.keys.onPressed = (event) => this._handleGridViewKey(event);
+
+    if (options.model !== undefined) this.model = options.model;
+    if (options.delegate !== undefined) this.delegate = options.delegate;
+    if (options.cellWidth !== undefined) this.cellWidth = options.cellWidth;
+    if (options.cellHeight !== undefined) this.cellHeight = options.cellHeight;
+    if (options.flow !== undefined) this.flow = options.flow;
+    if (options.spacing !== undefined) this.spacing = options.spacing;
+  }
+
+  // -----------------------------------------------------------------------
+  // Layout helpers
+  // -----------------------------------------------------------------------
+
+  // Is the flow LeftToRight (row-first)?
+  _isRowFlow() {
+    return (this.flow || 'LeftToRight') !== 'TopToBottom';
+  }
+
+  // Number of columns when flow=LeftToRight.
+  _columnsPerRow() {
+    const vw = this.width || 0;
+    const cw = (this.cellWidth || 100);
+    const sp = this.spacing || 0;
+    if (cw <= 0) return 1;
+    return Math.max(1, Math.floor((vw + sp) / (cw + sp)));
+  }
+
+  // Number of rows when flow=TopToBottom.
+  _rowsPerColumn() {
+    const vh = this.height || 0;
+    const ch = (this.cellHeight || 100);
+    const sp = this.spacing || 0;
+    if (ch <= 0) return 1;
+    return Math.max(1, Math.floor((vh + sp) / (ch + sp)));
+  }
+
+  // Cell (col, row) for a given linear index.
+  _cellPos(index) {
+    if (this._isRowFlow()) {
+      const cols = this._columnsPerRow();
+      return { col: index % cols, row: Math.floor(index / cols) };
+    }
+    const rows = this._rowsPerColumn();
+    return { col: Math.floor(index / rows), row: index % rows };
+  }
+
+  // Pixel position of a cell in content space (before adding headerSize).
+  _itemPixelPos(index) {
+    const { col, row } = this._cellPos(index);
+    const sp = this.spacing || 0;
+    return {
+      x: col * ((this.cellWidth || 100) + sp),
+      y: row * ((this.cellHeight || 100) + sp),
+    };
+  }
+
+  // Total rows spanned by the content (LeftToRight flow).
+  _totalContentRows() {
+    const count = _modelCount(this.model);
+    if (count === 0) return 0;
+    if (this._isRowFlow()) {
+      return Math.ceil(count / this._columnsPerRow());
+    }
+    // TopToBottom: each column has _rowsPerColumn rows; total rows = min(count, rows)
+    return Math.min(count, this._rowsPerColumn());
+  }
+
+  // Total columns spanned by the content (TopToBottom flow).
+  _totalContentColumns() {
+    const count = _modelCount(this.model);
+    if (count === 0) return 0;
+    if (!this._isRowFlow()) {
+      return Math.ceil(count / this._rowsPerColumn());
+    }
+    return this._columnsPerRow();
+  }
+
+  _headerSize() {
+    return this._headerItem ? (this._headerItem.height || 0) : 0;
+  }
+
+  _footerSize() {
+    return this._footerItem ? (this._footerItem.height || 0) : 0;
+  }
+
+  _delegateAreaHeight() {
+    const rows = this._totalContentRows();
+    if (rows === 0) return 0;
+    const sp = this.spacing || 0;
+    return rows * (this.cellHeight || 100) + (rows - 1) * sp;
+  }
+
+  _delegateAreaWidth() {
+    const cols = this._totalContentColumns();
+    if (cols === 0) return 0;
+    const sp = this.spacing || 0;
+    return cols * (this.cellWidth || 100) + (cols - 1) * sp;
+  }
+
+  _updateContentSize() {
+    const dh = this._delegateAreaHeight();
+    const total = this._headerSize() + dh + this._footerSize();
+    this._setPropertyValue('contentHeight', total);
+    this._setPropertyValue('contentWidth', Math.max(this.width || 0, this._delegateAreaWidth()));
+  }
+
+  // -----------------------------------------------------------------------
+  // Visible index range
+  // -----------------------------------------------------------------------
+
+  _visibleIndexRange() {
+    const count = _modelCount(this.model);
+    if (count === 0) return { first: 0, last: -1 };
+
+    const buffer = this.cacheBuffer || 0;
+    const headerS = this._headerSize();
+
+    if (this._isRowFlow()) {
+      const cols = this._columnsPerRow();
+      const ch = this.cellHeight || 100;
+      const sp = this.spacing || 0;
+      const rowStep = ch + sp;
+      const viewH = this.height || 0;
+      const scrollY = Math.max(0, (this.contentY || 0) - headerS);
+
+      const firstRow = Math.max(0, Math.floor((scrollY - buffer) / rowStep));
+      // A row is visible if its top edge is strictly before scrollY + viewH + buffer.
+      // Use ceil-based calculation so a row starting exactly at the boundary is excluded.
+      const lastRowExclusive = Math.ceil((scrollY + viewH + buffer) / rowStep);
+      const lastRow = Math.max(firstRow, lastRowExclusive - 1);
+
+      const first = firstRow * cols;
+      const last = Math.min(count - 1, (lastRow + 1) * cols - 1);
+      return { first, last };
+    }
+
+    // TopToBottom: items fill columns first; scroll is horizontal
+    const rows = this._rowsPerColumn();
+    const cw = this.cellWidth || 100;
+    const sp = this.spacing || 0;
+    const colStep = cw + sp;
+    const viewW = this.width || 0;
+    const scrollX = Math.max(0, this.contentX || 0);
+
+    const firstCol = Math.max(0, Math.floor((scrollX - buffer) / colStep));
+    const lastColExclusive = Math.ceil((scrollX + viewW + buffer) / colStep);
+    const lastCol = Math.max(firstCol, lastColExclusive - 1);
+
+    const first = firstCol * rows;
+    const last = Math.min(count - 1, (lastCol + 1) * rows - 1);
+    return { first, last };
+  }
+
+  // -----------------------------------------------------------------------
+  // Attached handler support (Qt-like GridView.onPooled / GridView.onReused)
+  // -----------------------------------------------------------------------
+
+  static _getAttached(item) {
+    if (!item._gridViewAttached) {
+      item._gridViewAttached = { onPooled: null, onReused: null };
+    }
+    return item._gridViewAttached;
+  }
+
+  static _invokeAttachedHandler(item, handlerName) {
+    const bag = item._gridViewAttached;
+    if (!bag) return;
+    const fn = bag[handlerName];
+    if (typeof fn === 'function') fn.call(item);
+  }
+
+  // -----------------------------------------------------------------------
+  // Model helpers
+  // -----------------------------------------------------------------------
+
+  _disconnectModel() {
+    for (const d of this._modelDisconnectors) d();
+    this._modelDisconnectors = [];
+  }
+
+  _onModelReplaced(newModel, _oldModel) {
+    this._disconnectModel();
+    if (newModel instanceof ListModel) {
+      this._modelDisconnectors.push(
+        newModel.rowsInserted.connect(() => this._rebuild()),
+        newModel.rowsRemoved.connect(() => this._rebuild()),
+        newModel.rowsMoved.connect(() => this._rebuild()),
+        newModel.dataChanged.connect((index) => this._onDataChanged(index)),
+      );
+    }
+    this._rebuild();
+  }
+
+  _onDataChanged(index) {
+    const old = this._delegateItems[index];
+    if (old) {
+      old.destroy();
+      this._delegateItems[index] = null;
+    }
+    this._updateVirtualization();
+  }
+
+  // -----------------------------------------------------------------------
+  // Header / footer
+  // -----------------------------------------------------------------------
+
+  _onHeaderFooterChanged(which) {
+    const isHeader = which === 'header';
+    const existingItem = isHeader ? this._headerItem : this._footerItem;
+    if (existingItem) existingItem.destroy();
+    if (isHeader) this._headerItem = null;
+    else this._footerItem = null;
+
+    const value = isHeader ? this.header : this.footer;
+    let created = null;
+    if (value instanceof Component) {
+      created = value.createObject(this, {}, this.getContext(), this.getComponentScope());
+    } else if (value instanceof Item) {
+      created = value;
+      created.parentItem = this;
+    }
+    if (created) {
+      created.x = 0;
+      created.y = isHeader ? 0 : this._headerSize() + this._delegateAreaHeight();
+    }
+    if (isHeader) this._headerItem = created;
+    else this._footerItem = created;
+    this._rebuild();
+  }
+
+  _positionFooter() {
+    if (!this._footerItem) return;
+    this._footerItem.y = this._headerSize() + this._delegateAreaHeight();
+    this._footerItem.x = 0;
+  }
+
+  // -----------------------------------------------------------------------
+  // Rebuild / virtualization
+  // -----------------------------------------------------------------------
+
+  _rebuild() {
+    if (this._rebuilding) return;
+    this._rebuilding = true;
+    try {
+      for (const item of this._reusePool) item.destroy();
+      this._reusePool = [];
+      for (const item of this._delegateItems) {
+        if (item) item.destroy();
+      }
+      this._delegateItems = [];
+
+      const count = _modelCount(this.model);
+      this._delegateItems = new Array(count).fill(null);
+      this._setPropertyValue('count', count);
+      this._updateContentSize();
+      this._positionFooter();
+      this._updateVirtualization();
+    } finally {
+      this._rebuilding = false;
+    }
+  }
+
+  _updateVirtualization() {
+    const count = _modelCount(this.model);
+    if (count === 0 || !(this.delegate instanceof Component)) {
+      this._setPropertyValue('count', 0);
+      this._updateContentSize();
+      this._positionFooter();
+      return;
+    }
+
+    this._setPropertyValue('count', count);
+    this._updateContentSize();
+    this._positionFooter();
+
+    const { first, last } = this._visibleIndexRange();
+
+    if (this._delegateItems.length < count) {
+      this._delegateItems.length = count;
+    }
+
+    // Pool or destroy items outside visible range
+    for (let i = 0; i < this._delegateItems.length; i++) {
+      const item = this._delegateItems[i];
+      if (item && (i < first || i > last)) {
+        if (this.reuseItems && this._reusePool.length < this._maxPoolSize) {
+          item.visible = false;
+          GridView._invokeAttachedHandler(item, 'onPooled');
+          this.pooled.emit(item, i);
+          this._reusePool.push(item);
+        } else {
+          item.destroy();
+        }
+        this._delegateItems[i] = null;
+      }
+    }
+
+    // Create/reuse and position items in visible range
+    for (let i = first; i <= last && i < count; i++) {
+      if (!this._delegateItems[i]) {
+        this._delegateItems[i] = this._reuseOrCreateAt(i);
+      }
+      if (this._delegateItems[i]) {
+        this._positionItem(i);
+      }
+    }
+
+    // Sync currentItem reference
+    const ci = this.currentIndex;
+    if (ci >= 0 && ci < count) {
+      this._setPropertyValue('currentItem', this._delegateItems[ci] ?? null);
+    }
+
+    this._updateHighlight();
+  }
+
+  _positionItem(index) {
+    const item = this._delegateItems[index];
+    if (!item) return;
+    const headerS = this._headerSize();
+    const pos = this._itemPixelPos(index);
+    item.x = pos.x;
+    item.y = headerS + pos.y;
+    // Enforce cell dimensions on delegates so they fill the cell.
+    item.width = this.cellWidth || 100;
+    item.height = this.cellHeight || 100;
+  }
+
+  // -----------------------------------------------------------------------
+  // Delegate creation with reuse pool
+  // -----------------------------------------------------------------------
+
+  _createAt(index) {
+    const delegate = this.delegate;
+    if (!(delegate instanceof Component)) return null;
+    const model = this.model;
+    const rowData = _modelRowData(model, index);
+    const ctx = _buildDelegateContext(this.getContext(), model, index, rowData);
+    return delegate.createObject(this, {}, ctx, this.getComponentScope());
+  }
+
+  _reuseOrCreateAt(index) {
+    if (this._reusePool.length > 0) {
+      const item = this._reusePool.pop();
+      const model = this.model;
+      const rowData = _modelRowData(model, index);
+      const ctx = _buildDelegateContext(this.getContext(), model, index, rowData);
+      item.setContext(ctx);
+      this._reevaluateBindings(item);
+      item.visible = true;
+      GridView._invokeAttachedHandler(item, 'onReused');
+      this.reused.emit(item, index);
+      return item;
+    }
+    return this._createAt(index);
+  }
+
+  _reevaluateBindings(item) {
+    for (const [name, state] of item._propertyBindings.entries()) {
+      for (const disconnect of state.dependencies.values()) disconnect();
+      state.dependencies.clear();
+      item._evaluateBinding(name, state);
+    }
+    for (const child of item._children) {
+      if (child instanceof QObject) this._reevaluateBindings(child);
+    }
+  }
+
+  // -----------------------------------------------------------------------
+  // Selection / current index
+  // -----------------------------------------------------------------------
+
+  _onCurrentIndexChanged() {
+    const count = _modelCount(this.model);
+    const ci = this.currentIndex;
+    const valid = ci >= 0 && ci < count;
+
+    if (valid) {
+      if (!this._delegateItems[ci] && this.delegate instanceof Component) {
+        if (this._delegateItems.length <= ci) this._delegateItems.length = ci + 1;
+        this._delegateItems[ci] = this._reuseOrCreateAt(ci);
+        if (this._delegateItems[ci]) this._positionItem(ci);
+      }
+      this._setPropertyValue('currentItem', this._delegateItems[ci] ?? null);
+    } else {
+      this._setPropertyValue('currentItem', null);
+    }
+
+    if (valid) this._scrollToCurrentIfNeeded();
+    this._updateHighlight();
+  }
+
+  _scrollToCurrentIfNeeded() {
+    const ci = this.currentIndex;
+    if (ci < 0) return;
+    const headerS = this._headerSize();
+    const pos = this._itemPixelPos(ci);
+    const itemTop = headerS + pos.y;
+    const itemBottom = itemTop + (this.cellHeight || 100);
+    const viewTop = this.contentY || 0;
+    const viewBottom = viewTop + (this.height || 0);
+    if (itemTop < viewTop) {
+      this.contentY = this._clampY(itemTop);
+    } else if (itemBottom > viewBottom) {
+      this.contentY = this._clampY(itemBottom - (this.height || 0));
+    }
+  }
+
+  // -----------------------------------------------------------------------
+  // Highlight
+  // -----------------------------------------------------------------------
+
+  _onHighlightChanged() {
+    const existing = this.highlightItem;
+    if (existing) {
+      existing.destroy();
+      this._setPropertyValue('highlightItem', null);
+    }
+    const h = this.highlight;
+    let hi = null;
+    if (h instanceof Component) {
+      hi = h.createObject(this, {}, this.getContext(), this.getComponentScope());
+    } else if (h instanceof Item) {
+      hi = h;
+      hi.parentItem = this;
+    }
+    if (hi) hi.z = -1;
+    this._setPropertyValue('highlightItem', hi);
+    this._updateHighlight();
+  }
+
+  _updateHighlight() {
+    const hi = this.highlightItem;
+    if (!hi || !this.highlightFollowsCurrentItem) return;
+    const ci = this.currentIndex;
+    if (ci < 0 || ci >= _modelCount(this.model)) {
+      hi.visible = false;
+      return;
+    }
+    const headerS = this._headerSize();
+    const pos = this._itemPixelPos(ci);
+    hi.x = pos.x;
+    hi.y = headerS + pos.y;
+    hi.width = this.cellWidth || 100;
+    hi.height = this.cellHeight || 100;
+    hi.visible = true;
+  }
+
+  // -----------------------------------------------------------------------
+  // Keyboard navigation
+  // -----------------------------------------------------------------------
+
+  _handleGridViewKey(event) {
+    const count = _modelCount(this.model);
+    if (count === 0) return;
+    const ci = this.currentIndex < 0 ? 0 : this.currentIndex;
+
+    if (this._isRowFlow()) {
+      const cols = this._columnsPerRow();
+      if (event.key === 'ArrowRight') {
+        const next = Math.min(count - 1, ci + 1);
+        if (next !== this.currentIndex) { this.currentIndex = next; event.accepted = true; }
+      } else if (event.key === 'ArrowLeft') {
+        const next = Math.max(0, ci - 1);
+        if (next !== this.currentIndex) { this.currentIndex = next; event.accepted = true; }
+      } else if (event.key === 'ArrowDown') {
+        const next = Math.min(count - 1, ci + cols);
+        if (next !== this.currentIndex) { this.currentIndex = next; event.accepted = true; }
+      } else if (event.key === 'ArrowUp') {
+        const next = Math.max(0, ci - cols);
+        if (next !== this.currentIndex) { this.currentIndex = next; event.accepted = true; }
+      }
+    } else {
+      // TopToBottom: items fill columns; ArrowDown/Up move within column
+      const rows = this._rowsPerColumn();
+      if (event.key === 'ArrowDown') {
+        const next = Math.min(count - 1, ci + 1);
+        if (next !== this.currentIndex) { this.currentIndex = next; event.accepted = true; }
+      } else if (event.key === 'ArrowUp') {
+        const next = Math.max(0, ci - 1);
+        if (next !== this.currentIndex) { this.currentIndex = next; event.accepted = true; }
+      } else if (event.key === 'ArrowRight') {
+        const next = Math.min(count - 1, ci + rows);
+        if (next !== this.currentIndex) { this.currentIndex = next; event.accepted = true; }
+      } else if (event.key === 'ArrowLeft') {
+        const next = Math.max(0, ci - rows);
+        if (next !== this.currentIndex) { this.currentIndex = next; event.accepted = true; }
+      }
+    }
+  }
+
+  // -----------------------------------------------------------------------
+  // Public API
+  // -----------------------------------------------------------------------
+
+  get createdCount() {
+    return this._delegateItems.filter(Boolean).length;
+  }
+
+  itemAt(index) {
+    return this._delegateItems[index] ?? null;
+  }
+
+  positionViewAtIndex(index, _mode = 0) {
+    const count = _modelCount(this.model);
+    if (index < 0 || index >= count) return;
+    const headerS = this._headerSize();
+    const pos = this._itemPixelPos(index);
+    this.contentY = this._clampY(headerS + pos.y);
+  }
+
+  destroy() {
+    this._disconnectModel();
+    for (const item of this._reusePool) item.destroy();
+    this._reusePool = [];
+    for (const item of this._delegateItems) {
+      if (item) item.destroy();
+    }
+    this._delegateItems = [];
+    if (this._headerItem) { this._headerItem.destroy(); this._headerItem = null; }
+    if (this._footerItem) { this._footerItem.destroy(); this._footerItem = null; }
+    const hi = this.highlightItem;
+    if (hi) { hi.destroy(); this._setPropertyValue('highlightItem', null); }
     super.destroy();
   }
 }
@@ -9173,6 +9845,7 @@ const runtimeExports = {
   Repeater,
   Flickable,
   ListView,
+  GridView,
   // Stage C: focus / keys / pointer handlers
   Keys,
   TapHandler,
