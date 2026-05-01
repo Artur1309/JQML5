@@ -6100,3 +6100,615 @@ test('BindingElement updates target when value changes while active', () => {
   assert.equal(target.count, 10);
   be.destroy();
 });
+
+// ---------------------------------------------------------------------------
+// Stage D: GridView – basic virtualization and layout
+// ---------------------------------------------------------------------------
+
+test('GridView creates delegates for visible range with uniform cell size', () => {
+  const { ListModel, GridView, Component, Item, Context } = require('../src/runtime');
+
+  const model = new ListModel();
+  for (let i = 0; i < 20; i++) model.append({ n: i });
+
+  const gv = new GridView();
+  gv.width = 300;
+  gv.height = 200;
+  gv.cellWidth = 100;
+  gv.cellHeight = 100;
+  gv.cacheBuffer = 0;
+  gv.setContext(new Context(null, {}));
+
+  const delegate = new Component(({ parent: p }) => {
+    const item = new Item({ parentItem: p });
+    return item;
+  });
+
+  gv.model = model;
+  gv.delegate = delegate;
+
+  // 3 columns × 2 rows visible (300/100=3 cols, 200/100=2 rows) → items 0-5 visible
+  assert.ok(gv.itemAt(0) !== null, 'item 0 should be visible');
+  assert.ok(gv.itemAt(5) !== null, 'item 5 should be visible (2 full rows)');
+  assert.equal(gv.itemAt(6), null, 'item 6 should not be created with cacheBuffer=0');
+
+  gv.destroy();
+});
+
+test('GridView contentHeight equals rows * cellHeight (LeftToRight flow)', () => {
+  const { ListModel, GridView, Component, Item, Context } = require('../src/runtime');
+
+  const model = new ListModel();
+  for (let i = 0; i < 9; i++) model.append({ n: i });
+
+  const gv = new GridView();
+  gv.width = 300;
+  gv.height = 1000;
+  gv.cellWidth = 100;
+  gv.cellHeight = 80;
+  gv.spacing = 0;
+  gv.cacheBuffer = 0;
+  gv.setContext(new Context(null, {}));
+
+  const delegate = new Component(({ parent: p }) => new Item({ parentItem: p }));
+
+  gv.model = model;
+  gv.delegate = delegate;
+
+  // 3 cols, 9 items → 3 rows; contentHeight = 3 * 80 = 240
+  assert.equal(gv.contentHeight, 240, 'contentHeight should be rows * cellHeight');
+  assert.equal(gv.count, 9, 'count should match model count');
+
+  gv.destroy();
+});
+
+test('GridView cell positions do not overlap (LeftToRight flow)', () => {
+  const { ListModel, GridView, Component, Item, Context } = require('../src/runtime');
+
+  const model = new ListModel();
+  for (let i = 0; i < 9; i++) model.append({ n: i });
+
+  const gv = new GridView();
+  gv.width = 300;
+  gv.height = 1000;
+  gv.cellWidth = 100;
+  gv.cellHeight = 80;
+  gv.spacing = 0;
+  gv.cacheBuffer = 0;
+  gv.setContext(new Context(null, {}));
+
+  const delegate = new Component(({ parent: p }) => new Item({ parentItem: p }));
+  gv.model = model;
+  gv.delegate = delegate;
+
+  // Row 0: items 0,1,2 → x=0,100,200  y=0
+  assert.equal(gv.itemAt(0).x, 0);   assert.equal(gv.itemAt(0).y, 0);
+  assert.equal(gv.itemAt(1).x, 100); assert.equal(gv.itemAt(1).y, 0);
+  assert.equal(gv.itemAt(2).x, 200); assert.equal(gv.itemAt(2).y, 0);
+  // Row 1: items 3,4,5 → x=0,100,200  y=80
+  assert.equal(gv.itemAt(3).x, 0);   assert.equal(gv.itemAt(3).y, 80);
+  assert.equal(gv.itemAt(4).x, 100); assert.equal(gv.itemAt(4).y, 80);
+  // Row 2: items 6,7,8 → y=160
+  assert.equal(gv.itemAt(6).x, 0);   assert.equal(gv.itemAt(6).y, 160);
+
+  gv.destroy();
+});
+
+test('GridView respects spacing between cells', () => {
+  const { ListModel, GridView, Component, Item, Context } = require('../src/runtime');
+
+  const model = new ListModel();
+  for (let i = 0; i < 4; i++) model.append({ n: i });
+
+  const gv = new GridView();
+  gv.width = 250;  // (100+10)*2 = 220 → 2 cols
+  gv.height = 1000;
+  gv.cellWidth = 100;
+  gv.cellHeight = 80;
+  gv.spacing = 10;
+  gv.cacheBuffer = 0;
+  gv.setContext(new Context(null, {}));
+
+  const delegate = new Component(({ parent: p }) => new Item({ parentItem: p }));
+  gv.model = model;
+  gv.delegate = delegate;
+
+  // 2 cols with spacing=10: item 0 at (0,0), item 1 at (110,0), item 2 at (0,90), item 3 at (110,90)
+  assert.equal(gv.itemAt(0).x, 0);
+  assert.equal(gv.itemAt(1).x, 110, 'second column x = cellWidth + spacing');
+  assert.equal(gv.itemAt(2).y, 90, 'second row y = cellHeight + spacing');
+
+  gv.destroy();
+});
+
+test('GridView virtualization: scrolling pools items above viewport', () => {
+  const { ListModel, GridView, Component, Item, Context } = require('../src/runtime');
+
+  const model = new ListModel();
+  for (let i = 0; i < 30; i++) model.append({ n: i });
+
+  const gv = new GridView();
+  gv.width = 300;   // 3 cols
+  gv.height = 200;  // 2 rows visible
+  gv.cellWidth = 100;
+  gv.cellHeight = 100;
+  gv.spacing = 0;
+  gv.cacheBuffer = 0;
+  gv.setContext(new Context(null, {}));
+
+  const delegate = new Component(({ parent: p }) => new Item({ parentItem: p }));
+  gv.model = model;
+  gv.delegate = delegate;
+
+  assert.ok(gv.itemAt(0) !== null, 'item 0 visible initially');
+
+  // Scroll down 300px (3 rows × 100)
+  gv.contentY = 300;
+
+  assert.equal(gv.itemAt(0), null, 'item 0 should be pooled after scroll');
+  assert.ok(gv.itemAt(9) !== null, 'item 9 should be visible after scrolling to row 3');
+
+  gv.destroy();
+});
+
+test('GridView reuseItems=true pools and reuses delegates', () => {
+  const { ListModel, GridView, Component, Item, Context } = require('../src/runtime');
+
+  const model = new ListModel();
+  for (let i = 0; i < 30; i++) model.append({ n: i });
+
+  const gv = new GridView();
+  gv.width = 300;
+  gv.height = 200;
+  gv.cellWidth = 100;
+  gv.cellHeight = 100;
+  gv.spacing = 0;
+  gv.cacheBuffer = 0;
+  gv.reuseItems = true;
+  gv.setContext(new Context(null, {}));
+
+  let creationCount = 0;
+  const pooledEvents = [];
+  const reusedEvents = [];
+  gv.connect('pooled', (item, idx) => pooledEvents.push(idx));
+  gv.connect('reused', (item, idx) => reusedEvents.push(idx));
+
+  const delegate = new Component(({ parent: p }) => {
+    creationCount++;
+    return new Item({ parentItem: p });
+  });
+  gv.model = model;
+  gv.delegate = delegate;
+
+  const initialCreations = creationCount;
+  assert.ok(initialCreations > 0, 'should create items initially');
+
+  // Scroll down to trigger pooling and reuse
+  gv.contentY = 600;
+
+  assert.ok(pooledEvents.length > 0, 'pooled signal should have fired');
+
+  // Scroll back – reuse should kick in
+  gv.contentY = 0;
+  assert.ok(reusedEvents.length > 0, 'reused signal should have fired');
+  assert.ok(
+    creationCount < initialCreations + 20,
+    'reuse should limit new delegate creations',
+  );
+
+  gv.destroy();
+});
+
+test('GridView TopToBottom flow places items column-first', () => {
+  const { ListModel, GridView, Component, Item, Context } = require('../src/runtime');
+
+  const model = new ListModel();
+  for (let i = 0; i < 6; i++) model.append({ n: i });
+
+  const gv = new GridView();
+  gv.width = 1000;
+  gv.height = 300;  // 3 rows (300/100=3)
+  gv.cellWidth = 100;
+  gv.cellHeight = 100;
+  gv.spacing = 0;
+  gv.flow = 'TopToBottom';
+  gv.cacheBuffer = 0;
+  gv.setContext(new Context(null, {}));
+
+  const delegate = new Component(({ parent: p }) => new Item({ parentItem: p }));
+  gv.model = model;
+  gv.delegate = delegate;
+
+  // TopToBottom, 3 rows: col 0 → items 0,1,2; col 1 → items 3,4,5
+  assert.equal(gv.itemAt(0).x, 0);   assert.equal(gv.itemAt(0).y, 0);
+  assert.equal(gv.itemAt(1).x, 0);   assert.equal(gv.itemAt(1).y, 100);
+  assert.equal(gv.itemAt(2).x, 0);   assert.equal(gv.itemAt(2).y, 200);
+  assert.equal(gv.itemAt(3).x, 100); assert.equal(gv.itemAt(3).y, 0);
+  assert.equal(gv.itemAt(4).x, 100); assert.equal(gv.itemAt(4).y, 100);
+  assert.equal(gv.itemAt(5).x, 100); assert.equal(gv.itemAt(5).y, 200);
+
+  gv.destroy();
+});
+
+test('GridView currentIndex/currentItem and highlight', () => {
+  const { ListModel, GridView, Component, Item, Context } = require('../src/runtime');
+
+  const model = new ListModel();
+  for (let i = 0; i < 9; i++) model.append({ n: i });
+
+  const gv = new GridView();
+  gv.width = 300;
+  gv.height = 1000;
+  gv.cellWidth = 100;
+  gv.cellHeight = 100;
+  gv.spacing = 0;
+  gv.cacheBuffer = 0;
+  gv.setContext(new Context(null, {}));
+
+  const delegate = new Component(({ parent: p }) => new Item({ parentItem: p }));
+  gv.model = model;
+  gv.delegate = delegate;
+
+  assert.equal(gv.currentIndex, -1, 'currentIndex defaults to -1');
+  assert.equal(gv.currentItem, null, 'currentItem defaults to null');
+
+  gv.currentIndex = 4;
+  assert.ok(gv.currentItem !== null, 'currentItem should be set');
+  assert.equal(gv.currentItem, gv.itemAt(4), 'currentItem should be item at currentIndex');
+
+  gv.destroy();
+});
+
+test('GridView keyboard navigation ArrowRight/Left/Down/Up (LeftToRight flow)', () => {
+  const { ListModel, GridView, Component, Item, Context } = require('../src/runtime');
+
+  const model = new ListModel();
+  for (let i = 0; i < 9; i++) model.append({ n: i });
+
+  const gv = new GridView();
+  gv.width = 300;   // 3 cols
+  gv.height = 1000;
+  gv.cellWidth = 100;
+  gv.cellHeight = 100;
+  gv.spacing = 0;
+  gv.cacheBuffer = 0;
+  gv.setContext(new Context(null, {}));
+
+  const delegate = new Component(({ parent: p }) => new Item({ parentItem: p }));
+  gv.model = model;
+  gv.delegate = delegate;
+  gv.currentIndex = 0;
+
+  const ev = (key) => ({ key, accepted: false });
+  let e;
+
+  e = ev('ArrowRight'); gv.keys.onPressed(e);
+  assert.equal(gv.currentIndex, 1, 'ArrowRight should advance by 1');
+
+  e = ev('ArrowDown'); gv.keys.onPressed(e);
+  assert.equal(gv.currentIndex, 4, 'ArrowDown should advance by cols (3) from 1→4');
+
+  e = ev('ArrowLeft'); gv.keys.onPressed(e);
+  assert.equal(gv.currentIndex, 3, 'ArrowLeft should go back by 1 from 4→3');
+
+  e = ev('ArrowUp'); gv.keys.onPressed(e);
+  assert.equal(gv.currentIndex, 0, 'ArrowUp should go back by cols (3) from 3→0');
+
+  gv.destroy();
+});
+
+test('GridView attached onPooled/onReused fire with reuseItems=true', () => {
+  const { ListModel, GridView, Component, Item, Context } = require('../src/runtime');
+
+  const model = new ListModel();
+  for (let i = 0; i < 30; i++) model.append({ n: i });
+
+  const gv = new GridView();
+  gv.width = 300;
+  gv.height = 200;
+  gv.cellWidth = 100;
+  gv.cellHeight = 100;
+  gv.spacing = 0;
+  gv.cacheBuffer = 0;
+  gv.reuseItems = true;
+  gv.setContext(new Context(null, {}));
+
+  const pooledLog = [];
+  const reusedLog = [];
+
+  const delegate = new Component(({ parent: p }) => {
+    const item = new Item({ parentItem: p });
+    GridView._getAttached(item).onPooled = function () { pooledLog.push(true); };
+    GridView._getAttached(item).onReused = function () { reusedLog.push(true); };
+    return item;
+  });
+
+  gv.model = model;
+  gv.delegate = delegate;
+
+  gv.contentY = 600;  // scroll away
+  gv.contentY = 0;    // scroll back (triggers reuse)
+
+  assert.ok(pooledLog.length > 0, 'onPooled attached handler should have fired');
+  assert.ok(reusedLog.length > 0, 'onReused attached handler should have fired');
+
+  gv.destroy();
+});
+
+test('GridView model update (append) increases count and contentHeight', () => {
+  const { ListModel, GridView, Component, Item, Context } = require('../src/runtime');
+
+  const model = new ListModel();
+  for (let i = 0; i < 3; i++) model.append({ n: i });
+
+  const gv = new GridView();
+  gv.width = 300;
+  gv.height = 1000;
+  gv.cellWidth = 100;
+  gv.cellHeight = 100;
+  gv.spacing = 0;
+  gv.cacheBuffer = 0;
+  gv.setContext(new Context(null, {}));
+
+  const delegate = new Component(({ parent: p }) => new Item({ parentItem: p }));
+  gv.model = model;
+  gv.delegate = delegate;
+
+  assert.equal(gv.count, 3);
+  assert.equal(gv.contentHeight, 100, '1 row of 100px');
+
+  model.append({ n: 3 });
+  assert.equal(gv.count, 4);
+  // 4 items in 3 cols → ceil(4/3) = 2 rows
+  assert.equal(gv.contentHeight, 200, '2 rows after 4 items with 3 cols');
+
+  gv.destroy();
+});
+
+// ---------------------------------------------------------------------------
+// ListView – incremental model changes (insert/remove without full rebuild)
+// ---------------------------------------------------------------------------
+
+test('ListView incremental insert: new item appears without recreating existing ones', () => {
+  const { ListModel, ListView, Component, Item, Context } = require('../src/runtime');
+
+  const model = new ListModel();
+  for (let i = 0; i < 5; i++) model.append({ n: i });
+
+  const lv = new ListView();
+  lv.width = 200;
+  lv.height = 2000;
+  lv.cacheBuffer = 0;
+  lv.setContext(new Context(null, {}));
+
+  let creationCount = 0;
+  const delegate = new Component(({ parent: p }) => {
+    creationCount++;
+    const item = new Item({ parentItem: p });
+    item.height = 40;
+    return item;
+  });
+
+  lv.model = model;
+  lv.delegate = delegate;
+
+  const countAfterInit = creationCount;
+  assert.equal(countAfterInit, 5, 'should create 5 items initially');
+
+  // Capture refs to existing items
+  const item0 = lv.itemAt(0);
+  const item4 = lv.itemAt(4);
+
+  // Insert a new item at position 2
+  model.insert(2, { n: 99 });
+
+  assert.equal(lv.count, 6, 'count should reflect insert');
+  assert.equal(creationCount, 6, 'only 1 new delegate should be created');
+  assert.equal(lv.itemAt(0), item0, 'item 0 reference should be preserved');
+  // Previous item4 is now at index 5
+  assert.equal(lv.itemAt(5), item4, 'item previously at 4 should now be at 5');
+
+  lv.destroy();
+});
+
+test('ListView incremental insert: contentHeight grows correctly', () => {
+  const { ListModel, ListView, Component, Item, Context } = require('../src/runtime');
+
+  const model = new ListModel();
+  for (let i = 0; i < 3; i++) model.append({ n: i });
+
+  const lv = new ListView();
+  lv.width = 200;
+  lv.height = 2000;
+  lv.cacheBuffer = 0;
+  lv.setContext(new Context(null, {}));
+
+  const delegate = new Component(({ parent: p }) => {
+    const item = new Item({ parentItem: p });
+    item.height = 50;
+    return item;
+  });
+
+  lv.model = model;
+  lv.delegate = delegate;
+
+  assert.equal(lv.contentHeight, 150, 'initial contentHeight = 3 * 50');
+
+  model.append({ n: 3 });
+  assert.equal(lv.contentHeight, 200, 'contentHeight should grow by 50 after append');
+  assert.equal(lv.count, 4);
+
+  lv.destroy();
+});
+
+test('ListView incremental remove: items destroyed and contentHeight shrinks', () => {
+  const { ListModel, ListView, Component, Item, Context } = require('../src/runtime');
+
+  const model = new ListModel();
+  for (let i = 0; i < 5; i++) model.append({ n: i });
+
+  const lv = new ListView();
+  lv.width = 200;
+  lv.height = 2000;
+  lv.cacheBuffer = 0;
+  lv.setContext(new Context(null, {}));
+
+  let creationCount = 0;
+  const delegate = new Component(({ parent: p }) => {
+    creationCount++;
+    const item = new Item({ parentItem: p });
+    item.height = 40;
+    return item;
+  });
+
+  lv.model = model;
+  lv.delegate = delegate;
+
+  const countAfterInit = creationCount;
+  assert.equal(countAfterInit, 5);
+  assert.equal(lv.contentHeight, 200);
+
+  // Remove item at index 1
+  const item0 = lv.itemAt(0);
+  model.remove(1);
+
+  assert.equal(lv.count, 4, 'count should decrease');
+  assert.equal(lv.contentHeight, 160, 'contentHeight should shrink');
+  assert.equal(lv.itemAt(0), item0, 'item 0 should be preserved');
+  assert.equal(creationCount, 5, 'no new delegates should be created on remove');
+
+  lv.destroy();
+});
+
+test('ListView incremental remove: positions of remaining items are correct', () => {
+  const { ListModel, ListView, Component, Item, Context } = require('../src/runtime');
+
+  const model = new ListModel();
+  for (let i = 0; i < 4; i++) model.append({ n: i });
+
+  const lv = new ListView();
+  lv.width = 200;
+  lv.height = 2000;
+  lv.spacing = 0;
+  lv.cacheBuffer = 0;
+  lv.setContext(new Context(null, {}));
+
+  const delegate = new Component(({ parent: p }) => {
+    const item = new Item({ parentItem: p });
+    item.height = 40;
+    return item;
+  });
+
+  lv.model = model;
+  lv.delegate = delegate;
+
+  // Positions before: 0→0, 1→40, 2→80, 3→120
+  assert.equal(lv.itemAt(0).y, 0);
+  assert.equal(lv.itemAt(1).y, 40);
+  assert.equal(lv.itemAt(2).y, 80);
+
+  // Remove item at index 0
+  model.remove(0);
+
+  // Remaining items shift: 0→0, 1→40 (old items 1,2,3 are now 0,1,2)
+  assert.equal(lv.itemAt(0).y, 0, 'first remaining item should be at y=0');
+  assert.equal(lv.itemAt(1).y, 40, 'second remaining item should be at y=40');
+  assert.equal(lv.itemAt(2).y, 80, 'third remaining item should be at y=80');
+
+  lv.destroy();
+});
+
+test('ListView incremental remove with reuseItems: removed items go to pool', () => {
+  const { ListModel, ListView, Component, Item, Context } = require('../src/runtime');
+
+  const model = new ListModel();
+  for (let i = 0; i < 5; i++) model.append({ n: i });
+
+  const lv = new ListView();
+  lv.width = 200;
+  lv.height = 2000;
+  lv.cacheBuffer = 0;
+  lv.reuseItems = true;
+  lv.setContext(new Context(null, {}));
+
+  const delegate = new Component(({ parent: p }) => {
+    const item = new Item({ parentItem: p });
+    item.height = 40;
+    return item;
+  });
+
+  lv.model = model;
+  lv.delegate = delegate;
+
+  // Remove one item – it should go to the pool
+  model.remove(2);
+
+  assert.ok(lv._reusePool.length > 0, 'removed item should be in pool when reuseItems=true');
+
+  lv.destroy();
+});
+
+test('ListView incremental insert: positions after insert are correct', () => {
+  const { ListModel, ListView, Component, Item, Context } = require('../src/runtime');
+
+  const model = new ListModel();
+  for (let i = 0; i < 3; i++) model.append({ n: i });
+
+  const lv = new ListView();
+  lv.width = 200;
+  lv.height = 2000;
+  lv.spacing = 0;
+  lv.cacheBuffer = 0;
+  lv.setContext(new Context(null, {}));
+
+  const delegate = new Component(({ parent: p }) => {
+    const item = new Item({ parentItem: p });
+    item.height = 40;
+    return item;
+  });
+
+  lv.model = model;
+  lv.delegate = delegate;
+
+  // Insert at index 1
+  model.insert(1, { n: 99 });
+
+  // Expected positions: 0→0, 1→40(new), 2→80(old 1), 3→120(old 2)
+  assert.equal(lv.itemAt(0).y, 0);
+  assert.equal(lv.itemAt(1).y, 40, 'inserted item should be at y=40');
+  assert.equal(lv.itemAt(2).y, 80, 'shifted item should be at y=80');
+  assert.equal(lv.itemAt(3).y, 120, 'last shifted item should be at y=120');
+
+  lv.destroy();
+});
+
+test('ListView clear() triggers full rebuild and count resets to 0', () => {
+  const { ListModel, ListView, Component, Item, Context } = require('../src/runtime');
+
+  const model = new ListModel();
+  for (let i = 0; i < 5; i++) model.append({ n: i });
+
+  const lv = new ListView();
+  lv.width = 200;
+  lv.height = 200;
+  lv.cacheBuffer = 0;
+  lv.setContext(new Context(null, {}));
+
+  const delegate = new Component(({ parent: p }) => {
+    const item = new Item({ parentItem: p });
+    item.height = 40;
+    return item;
+  });
+
+  lv.model = model;
+  lv.delegate = delegate;
+
+  assert.equal(lv.count, 5);
+
+  model.clear();
+
+  assert.equal(lv.count, 0, 'count should be 0 after clear()');
+  assert.equal(lv.contentHeight, 0, 'contentHeight should be 0 after clear()');
+
+  lv.destroy();
+});
