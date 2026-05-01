@@ -5771,6 +5771,262 @@ test('TextArea is focusable', () => {
 });
 
 // ---------------------------------------------------------------------------
+// PR-C: Loader enhancements
+// ---------------------------------------------------------------------------
+
+test('Loader status transitions: Null -> Loading -> Ready', () => {
+  const { Item, Component, Loader } = require('../src/runtime');
+  const host = new Item();
+
+  const comp = new Component(({ parent }) => {
+    return new Item({ parentItem: parent });
+  });
+
+  const loader = new Loader({ parentItem: host, active: false });
+  assert.equal(loader.status, Loader.Null, 'inactive loader should be Null');
+
+  loader.sourceComponent = comp;
+  loader.active = true;
+  assert.equal(loader.status, Loader.Ready, 'after load status should be Ready');
+  assert.equal(loader.progress, 1.0, 'progress should be 1.0 when ready');
+  assert.ok(loader.item instanceof Item, 'item should be an Item');
+});
+
+test('Loader unloads when active set to false: status returns to Null', () => {
+  const { Item, Component, Loader } = require('../src/runtime');
+  const host = new Item();
+
+  const comp = new Component(({ parent }) => new Item({ parentItem: parent }));
+  const loader = new Loader({ parentItem: host, sourceComponent: comp });
+  assert.equal(loader.status, Loader.Ready);
+
+  loader.active = false;
+  assert.equal(loader.status, Loader.Null);
+  assert.equal(loader.item, null);
+  assert.equal(loader.progress, 0);
+});
+
+test('Loader emits loaded signal when item created', () => {
+  const { Item, Component, Loader } = require('../src/runtime');
+  const host = new Item();
+
+  const comp = new Component(({ parent }) => new Item({ parentItem: parent }));
+  let loadedCalled = 0;
+
+  const loader = new Loader({ parentItem: host, active: false });
+  loader.loaded.connect(() => { loadedCalled += 1; });
+
+  loader.sourceComponent = comp;
+  loader.active = true;
+  assert.equal(loadedCalled, 1, 'loaded signal should fire once');
+});
+
+test('Loader.item is parented to Loader', () => {
+  const { Item, Component, Loader } = require('../src/runtime');
+  const host = new Item();
+
+  const comp = new Component(({ parent }) => new Item({ parentItem: parent }));
+  const loader = new Loader({ parentItem: host, sourceComponent: comp });
+
+  assert.ok(loader.item instanceof Item);
+  assert.equal(loader.item.parentItem, loader, 'item parentItem should be the Loader');
+});
+
+test('Loader.source resolves via Qt.registerComponent', () => {
+  const { Item, Component, Loader, Qt } = require('../src/runtime');
+  const host = new Item();
+
+  Qt.registerComponent('mycomp://page', ({ parent }) => new Item({ parentItem: parent }));
+
+  const loader = new Loader({ parentItem: host, source: 'mycomp://page' });
+  assert.equal(loader.status, Loader.Ready, 'source-loaded Loader should be Ready');
+  assert.ok(loader.item instanceof Item);
+});
+
+// ---------------------------------------------------------------------------
+// PR-C: Timer tests
+// ---------------------------------------------------------------------------
+
+test('Timer defaults: interval=1000, repeat=false, running=false', () => {
+  const { Timer } = require('../src/runtime');
+  const t = new Timer();
+  assert.equal(t.interval, 1000);
+  assert.equal(t.repeat,   false);
+  assert.equal(t.running,  false);
+  assert.equal(t.triggeredOnStart, false);
+  t.destroy();
+});
+
+test('Timer fires triggered via manual ticker advance', () => {
+  const { Timer, AnimationTicker } = require('../src/runtime');
+
+  const ticker = new AnimationTicker();
+  // Patch _globalTicker temporarily
+  const runtime = require('../src/runtime');
+  const originalAdd    = runtime._globalTicker ? runtime._globalTicker.add.bind(runtime._globalTicker) : null;
+
+  // We'll drive the timer manually by calling _tickerObj._tick directly.
+  const t = new Timer({ interval: 100, repeat: false });
+
+  let fired = 0;
+  t.triggered.connect(() => { fired += 1; });
+
+  t.start();
+  assert.equal(t.running, true);
+
+  // Manually tick to simulate time passing
+  assert.ok(t._tickerObj, 'tickerObj should exist when running');
+  t._tickerObj._tick(50);  // not yet
+  assert.equal(fired, 0);
+  t._tickerObj._tick(60);  // total 110ms >= 100ms
+  assert.equal(fired, 1);
+  assert.equal(t.running, false, 'non-repeat timer stops after firing');
+
+  t.destroy();
+});
+
+test('Timer repeats when repeat=true', () => {
+  const { Timer } = require('../src/runtime');
+  const t = new Timer({ interval: 50, repeat: true });
+
+  let fired = 0;
+  t.triggered.connect(() => { fired += 1; });
+  t.start();
+
+  t._tickerObj._tick(60);   // 1st fire
+  t._tickerObj._tick(60);   // 2nd fire
+  assert.equal(fired, 2);
+  assert.equal(t.running, true, 'repeating timer keeps running');
+
+  t.stop();
+  assert.equal(t.running, false);
+  t.destroy();
+});
+
+test('Timer triggeredOnStart fires immediately', () => {
+  const { Timer } = require('../src/runtime');
+  let fired = 0;
+  const t = new Timer({ interval: 1000, repeat: false, triggeredOnStart: true });
+  t.triggered.connect(() => { fired += 1; });
+  t.start();
+  assert.equal(fired, 1, 'triggeredOnStart should fire immediately on start');
+  // After immediate fire with repeat=false, timer should stop
+  assert.equal(t.running, false);
+  t.destroy();
+});
+
+test('Timer restart resets elapsed', () => {
+  const { Timer } = require('../src/runtime');
+  const t = new Timer({ interval: 100 });
+  let fired = 0;
+  t.triggered.connect(() => { fired += 1; });
+  t.start();
+  t._tickerObj._tick(80);
+  t.restart();
+  // After restart, _tickerObj is replaced – capture the new one
+  const ticker = t._tickerObj;
+  ticker._tick(30);  // should not fire yet (only 30ms since restart)
+  assert.equal(fired, 0, 'should not have fired after restart with insufficient elapsed');
+  ticker._tick(80);  // 110ms total since restart
+  assert.equal(fired, 1);
+  t.destroy();
+});
+
+// ---------------------------------------------------------------------------
+// PR-C: Connections tests
+// ---------------------------------------------------------------------------
+
+test('Connections wires onSomeSignal to target signal', () => {
+  const { QObject, Connections } = require('../src/runtime');
+
+  const emitter = new QObject();
+  emitter.defineSignal('clicked');
+
+  let clickCount = 0;
+  const conn = new Connections({
+    target: emitter,
+    onClicked: () => { clickCount += 1; },
+  });
+
+  emitter.clicked.emit();
+  assert.equal(clickCount, 1);
+
+  emitter.clicked.emit();
+  assert.equal(clickCount, 2);
+
+  conn.destroy();
+});
+
+test('Connections enabled=false suppresses handler', () => {
+  const { QObject, Connections } = require('../src/runtime');
+
+  const emitter = new QObject();
+  emitter.defineSignal('tapped');
+
+  let count = 0;
+  const conn = new Connections({ target: emitter, enabled: false, onTapped: () => { count += 1; } });
+
+  emitter.tapped.emit();
+  assert.equal(count, 0, 'disabled Connections should not forward signals');
+
+  conn.enabled = true;
+  emitter.tapped.emit();
+  assert.equal(count, 1, 're-enabled Connections should forward signals');
+
+  conn.destroy();
+});
+
+test('Connections supports dynamic target switch', () => {
+  const { QObject, Connections } = require('../src/runtime');
+
+  const a = new QObject();
+  a.defineSignal('fired');
+  const b = new QObject();
+  b.defineSignal('fired');
+
+  let log = [];
+  const conn = new Connections({
+    target: a,
+    onFired: () => { log.push('a'); },
+  });
+
+  a.fired.emit();
+  assert.deepEqual(log, ['a']);
+
+  // Switch target to b and update handler
+  conn.setHandler('onFired', () => { log.push('b'); });
+  conn.target = b;
+
+  b.fired.emit();
+  assert.deepEqual(log, ['a', 'b']);
+
+  // Old target no longer fires handler
+  a.fired.emit();
+  assert.deepEqual(log, ['a', 'b'], 'old target should not trigger after switch');
+
+  conn.destroy();
+});
+
+test('Connections.setHandler registers new handler', () => {
+  const { QObject, Connections } = require('../src/runtime');
+
+  const emitter = new QObject();
+  emitter.defineSignal('valueChanged');
+
+  let values = [];
+  const conn = new Connections({ target: emitter });
+  conn.setHandler('onValueChanged', (v) => { values.push(v); });
+
+  emitter.valueChanged.emit(42);
+  assert.deepEqual(values, [42]);
+
+  conn.destroy();
+});
+
+// ---------------------------------------------------------------------------
+// PR-C: BindingElement tests
+// ---------------------------------------------------------------------------
+
 // Step C: Loader enhancements
 // ---------------------------------------------------------------------------
 
@@ -6044,11 +6300,33 @@ test('Connections destroy disconnects handlers', () => {
 
 test('BindingElement applies value to target property when when=true', () => {
   const { QObject, BindingElement } = require('../src/runtime');
-  const target = new QObject();
-  target.defineProperty('color', 'red');
 
-  const be = new BindingElement({ target, property: 'color', value: 'blue', when: true });
-  assert.equal(target.color, 'blue');
+  const target = new QObject();
+  target.defineProperty('x', 0);
+
+  const be = new BindingElement({ target, property: 'x', value: 42 });
+  assert.equal(target.x, 42, 'BindingElement should apply value immediately');
+
+  be.destroy();
+});
+
+test('BindingElement deactivates and restores when when=false', () => {
+  const { QObject, BindingElement } = require('../src/runtime');
+
+  const target = new QObject();
+  target.defineProperty('count', 10);
+
+  const be = new BindingElement({
+    target,
+    property: 'count',
+    value: 99,
+    restoreMode: BindingElement.RestorePreviousValue,
+  });
+  assert.equal(target.count, 99);
+
+  be.when = false;
+  assert.equal(target.count, 10, 'should restore previous value when deactivated');
+
   be.destroy();
 });
 
@@ -6068,7 +6346,7 @@ test('BindingElement activates when when changes to true', () => {
   target.defineProperty('label', 'original');
 
   const be = new BindingElement({ target, property: 'label', value: 'overridden', when: false });
-  assert.equal(target.label, 'original');
+  assert.equal(target.label, 'original', 'value should not be applied when when=false');
 
   be.when = true;
   assert.equal(target.label, 'overridden');
@@ -6099,6 +6377,51 @@ test('BindingElement updates target when value changes while active', () => {
   be.value = 10;
   assert.equal(target.count, 10);
   be.destroy();
+});
+
+// ---------------------------------------------------------------------------
+// PR-C: Qt.createComponent / Qt.createQmlObject tests
+// ---------------------------------------------------------------------------
+
+test('Qt.createComponent returns Component for registered URL', () => {
+  const { Qt, QObject, Item, Component } = require('../src/runtime');
+
+  Qt.registerComponent('test://mypage', ({ parent }) => {
+    const item = new Item({ parentItem: parent });
+    item.defineProperty('pageId', 'mypage');
+    return item;
+  });
+
+  const comp = Qt.createComponent('test://mypage');
+  assert.ok(comp instanceof Component, 'createComponent should return a Component');
+
+  const host = new Item();
+  const instance = comp.createObject(host);
+  assert.ok(instance instanceof Item);
+  assert.equal(instance.pageId, 'mypage');
+});
+
+test('Qt.createComponent returns stub for unknown URL', () => {
+  const { Qt, Component } = require('../src/runtime');
+
+  const comp = Qt.createComponent('test://unknown-xyz');
+  assert.ok(comp instanceof Component, 'stub should be a Component');
+  assert.ok(comp._error, 'stub should have an error message');
+});
+
+test('Qt.createQmlObject with factory function creates object', () => {
+  const { Qt, Item } = require('../src/runtime');
+
+  const host = new Item();
+  const factory = ({ parent }) => {
+    const item = new Item({ parentItem: parent });
+    item.defineProperty('dynamic', true);
+    return item;
+  };
+
+  const obj = Qt.createQmlObject(factory, host);
+  assert.ok(obj instanceof Item);
+  assert.equal(obj.dynamic, true);
 });
 
 // ---------------------------------------------------------------------------

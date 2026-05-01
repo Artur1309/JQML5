@@ -1369,7 +1369,7 @@ class Component {
 }
 
 // ---------------------------------------------------------------------------
-// Qt – namespace object with constants and utility helpers
+// Qt – namespace object with constants and utility helpers (PR-C enhanced)
 // ---------------------------------------------------------------------------
 
 const Qt = {
@@ -1388,16 +1388,38 @@ const Qt = {
   AlignBottom:  'bottom',
   AlignVCenter: 'vcenter',
 
-  // Step C: minimal Qt.createComponent helper (synchronous)
-  // Components can be pre-registered via Qt.registerComponent(url, component).
+  // ---------------------------------------------------------------------------
+  // PR-C: Qt.createComponent and Qt.createQmlObject
+  // ---------------------------------------------------------------------------
   _componentRegistry: new Map(),
 
-  registerComponent(url, component) {
-    this._componentRegistry.set(url, component);
+  registerComponent(url, factoryOrComponent) {
+    Qt._componentRegistry.set(url, factoryOrComponent);
   },
 
   createComponent(url) {
-    return this._componentRegistry.get(url) ?? null;
+    const entry = Qt._componentRegistry.get(url);
+    if (entry instanceof Component) {
+      return entry;
+    }
+    if (typeof entry === 'function') {
+      return new Component(entry);
+    }
+    // Return an error stub
+    const stub = new Component(() => null);
+    stub._url   = url;
+    stub._error = `createComponent: component not found: "${url}"`;
+    return stub;
+  },
+
+  createQmlObject(qmlStringOrFactory, parent, _fileName) {
+    if (typeof qmlStringOrFactory === 'function') {
+      const comp = new Component(qmlStringOrFactory);
+      return comp.createObject(parent instanceof QObject ? parent : null);
+    }
+    console.warn('Qt.createQmlObject: runtime QML string evaluation is not supported; ' +
+      'pass a compiled factory function instead.');
+    return null;
   },
 };
 
@@ -1406,6 +1428,9 @@ class Loader extends Item {
     super(options);
 
     this._loading = false;
+
+    // Status constants (mirrors Qt enum)
+    // Loader.Null = 0, Loader.Ready = 1, Loader.Loading = 2, Loader.Error = 3
 
     this.defineProperty('source', '', {
       onChanged: () => this._reload(),
@@ -1418,6 +1443,8 @@ class Loader extends Item {
     this.defineProperty('active', true, {
       onChanged: () => this._reload(),
     });
+
+    this.defineProperty('asynchronous', options.asynchronous ?? false);
 
     this.defineProperty('status', Loader.Null, { readOnly: true });
     this.defineProperty('progress', 0, { readOnly: true });
@@ -1459,6 +1486,15 @@ class Loader extends Item {
     this._setReadOnlyProp('item', value);
   }
 
+  _unload() {
+    if (this.item instanceof QObject) {
+      this.item.destroy();
+      this._setItem(null);
+    }
+    this._setReadOnlyProp('status', Loader.Null);
+    this._setReadOnlyProp('progress', 0);
+  }
+
   _reload() {
     if (this._loading || this._destroying) {
       return;
@@ -1466,10 +1502,7 @@ class Loader extends Item {
 
     this._loading = true;
     try {
-      if (this.item instanceof QObject) {
-        this.item.destroy();
-        this._setItem(null);
-      }
+      this._unload();
 
       if (!this.active) {
         this._setReadOnlyProp('status', Loader.Null);
@@ -1483,7 +1516,7 @@ class Loader extends Item {
         component = this.sourceComponent;
       } else if (this.source && typeof this.source === 'string') {
         // Use Qt.createComponent if a component has been registered for this URL
-        if (typeof Qt.createComponent === 'function') {
+        if (typeof Qt !== 'undefined' && typeof Qt.createComponent === 'function') {
           component = Qt.createComponent(this.source);
         }
       }
@@ -1498,40 +1531,402 @@ class Loader extends Item {
       this._setReadOnlyProp('status', Loader.Loading);
       this._setReadOnlyProp('progress', 0);
 
-      const instance = component.createObject(
-        this,
-        {},
-        this.getContext(),
-        this.getComponentScope(),
-      );
-      this._setItem(instance);
-      this._setReadOnlyProp('status', Loader.Ready);
-      this._setReadOnlyProp('progress', 1);
-      this.loaded.emit();
-      if (typeof this.onLoaded === 'function') {
-        this.onLoaded.call(this);
+      const doLoad = () => {
+        if (this._destroying) return;
+        const instance = component.createObject(
+          this,
+          {},
+          this.getContext(),
+          this.getComponentScope(),
+        );
+        this._setItem(instance);
+        this._setReadOnlyProp('status', Loader.Ready);
+        this._setReadOnlyProp('progress', 1);
+        this.loaded.emit();
+        if (typeof this.onLoaded === 'function') {
+          this.onLoaded.call(this);
+        }
+      };
+
+      if (this.asynchronous) {
+        // Best-effort async: defer to next microtask
+        Promise.resolve().then(() => {
+          this._loading = false;
+          doLoad();
+        });
+        return; // _loading cleared in the promise callback
+      } else {
+        doLoad();
       }
     } catch (_err) {
       this._setReadOnlyProp('status', Loader.Error);
       this._setReadOnlyProp('progress', 0);
     } finally {
-      this._loading = false;
+      if (!this.asynchronous) {
+        this._loading = false;
+      }
     }
   }
 
   destroy() {
-    if (this.item instanceof QObject) {
-      this.item.destroy();
-      this._setItem(null);
-    }
+    this._unload();
     super.destroy();
   }
 }
 
+// Status enum constants
 Loader.Null    = 0;
 Loader.Ready   = 1;
 Loader.Loading = 2;
 Loader.Error   = 3;
+
+// ---------------------------------------------------------------------------
+// PR-C: Timer – interval-based event source
+// ---------------------------------------------------------------------------
+
+class Timer extends QObject {
+  constructor(options = {}) {
+    super();
+
+    this.defineProperty('interval',          options.interval          ?? 1000);
+    this.defineProperty('repeat',            options.repeat            ?? false);
+    this.defineProperty('running',           options.running           ?? false);
+    this.defineProperty('triggeredOnStart',  options.triggeredOnStart  ?? false);
+
+    this.defineSignal('triggered');
+
+    this._timerId    = null;
+    this._tickerObj  = null;
+    this._elapsed    = 0;
+    // Allow a custom ticker to be injected (useful for tests).
+    this._ticker     = options.ticker || _globalTicker;
+
+    this.connect('runningChanged', (running) => {
+      if (running) {
+        this._start();
+      } else {
+        this._stop();
+      }
+    });
+
+    this.connect('intervalChanged', () => {
+      if (this.running) {
+        this._stop();
+        this._start();
+      }
+    });
+
+    if (this.running) {
+      this._start();
+    }
+  }
+
+  _start() {
+    this._stop();
+    this._elapsed = 0;
+
+    if (this.triggeredOnStart) {
+      this._fire();
+      if (!this.repeat) {
+        this._setPropertyValue('running', false);
+        return;
+      }
+    }
+
+    // Register with the ticker (global or injected).
+    this._elapsed = 0;
+    this._tickerObj = {
+      _tick: (dt) => {
+        if (!this.running) {
+          this._stop();
+          return;
+        }
+        this._elapsed += dt;
+        if (this._elapsed >= this.interval) {
+          this._elapsed -= this.interval;
+          this._fire();
+          if (!this.repeat) {
+            this._setPropertyValue('running', false);
+            this._stop();
+          }
+        }
+      },
+    };
+    this._ticker.add(this._tickerObj);
+  }
+
+  _fire() {
+    this.triggered.emit();
+    if (typeof this.onTriggered === 'function') {
+      this.onTriggered.call(this);
+    }
+  }
+
+  _stop() {
+    if (this._tickerObj) {
+      this._ticker.remove(this._tickerObj);
+      this._tickerObj = null;
+    }
+    this._elapsed = 0;
+  }
+
+  /** Restart the timer. */
+  restart() {
+    // Stop then re-start; the runningChanged handler will call _start() for us.
+    this._setPropertyValue('running', false);
+    this._setPropertyValue('running', true);
+  }
+
+  /** Start the timer. No-op if already running (matches Qt semantics). */
+  start() {
+    if (!this.running) {
+      this._setPropertyValue('running', true);
+    }
+  }
+
+  /** Stop the timer. */
+  stop() {
+    if (this.running) {
+      this._setPropertyValue('running', false);
+    }
+  }
+
+  destroy() {
+    this._stop();
+    super.destroy();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// PR-C: Connections – declarative signal handler wiring
+// ---------------------------------------------------------------------------
+
+class Connections extends QObject {
+  constructor(options = {}) {
+    super();
+
+    // Map of signalName → handler function
+    this._pendingHandlers = new Map();
+    // Map of signalName → disconnect function (active connections to target)
+    this._targetDisconnectors = new Map();
+
+    this.defineProperty('target', null, {
+      onChanged: () => this._reconnect(),
+    });
+
+    this.defineProperty('enabled', true, {
+      onChanged: (newVal) => {
+        if (newVal) {
+          this._connectAll();
+        } else {
+          this._disconnectAll();
+        }
+      },
+    });
+
+    if ('target'  in options) this.target  = options.target;
+    if ('enabled' in options) this.enabled = options.enabled;
+
+    // Accept handler functions passed as options (e.g. { onClicked: () => {} })
+    for (const [key, value] of Object.entries(options)) {
+      if (key.startsWith('on') && key.length > 3 &&
+          key[2] === key[2].toUpperCase() && typeof value === 'function') {
+        const signalName = key[2].toLowerCase() + key.slice(3);
+        this.connect(signalName, value);
+      }
+    }
+  }
+
+  /**
+   * Override connect() to forward signal handlers to the target.
+   * When signalName is a known QObject signal registration pattern, store
+   * the handler and wire it directly to target[signalName].
+   */
+  connect(signalName, listener) {
+    if (typeof listener !== 'function') {
+      return super.connect(signalName, listener);
+    }
+    // Disconnect old handler for this signal if already wired
+    if (this._targetDisconnectors.has(signalName)) {
+      const old = this._targetDisconnectors.get(signalName);
+      try { if (typeof old === 'function') old(); } catch (_) { /* ignore */ }
+      this._targetDisconnectors.delete(signalName);
+    }
+    this._pendingHandlers.set(signalName, listener);
+    if (this.target && this.enabled) {
+      this._connectOne(signalName, listener);
+    }
+  }
+
+  /**
+   * Register a signal handler function for the given signal name.
+   * handlerName should be in the Qt style: 'onSignalName'.
+   */
+  setHandler(handlerName, fn) {
+    if (!handlerName.startsWith('on') ||
+        handlerName.length < 3 ||
+        handlerName[2] !== handlerName[2].toUpperCase() ||
+        handlerName[2] === handlerName[2].toLowerCase()) {
+      throw new Error(`Connections: handler name must start with "on" followed by an uppercase letter, got "${handlerName}"`);
+    }
+    const signalName = handlerName[2].toLowerCase() + handlerName.slice(3);
+    this.connect(signalName, fn);
+  }
+
+  _connectOne(signalName, handler) {
+    const target = this.target;
+    if (!(target instanceof QObject)) return;
+    try {
+      const sig = target.signal ? target.signal(signalName) : null;
+      if (sig && typeof sig.connect === 'function') {
+        const disconnector = sig.connect(handler);
+        this._targetDisconnectors.set(signalName, disconnector);
+      }
+    } catch (_) {
+      // Signal may not exist – silently skip
+    }
+  }
+
+  _connectAll() {
+    if (!this.target) return;
+    for (const [signalName, handler] of this._pendingHandlers) {
+      if (!this._targetDisconnectors.has(signalName)) {
+        this._connectOne(signalName, handler);
+      }
+    }
+  }
+
+  _disconnectAll() {
+    for (const disconnector of this._targetDisconnectors.values()) {
+      try { if (typeof disconnector === 'function') disconnector(); } catch (_) { /* ignore */ }
+    }
+    this._targetDisconnectors.clear();
+  }
+
+  _reconnect() {
+    this._disconnectAll();
+    if (this.enabled) {
+      this._connectAll();
+    }
+  }
+
+  destroy() {
+    this._disconnectAll();
+    super.destroy();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// PR-C: BindingElement – declarative property binding
+// ---------------------------------------------------------------------------
+
+class BindingElement extends QObject {
+  constructor(options = {}) {
+    super();
+
+    // restoreMode constants
+    // BindingElement.RestoreNone = 0, BindingElement.RestoreBinding = 1,
+    // BindingElement.RestorePreviousValue = 2, BindingElement.RestoreBindingOrValue = 3
+
+    this.defineProperty('target',      options.target      ?? null);
+    this.defineProperty('property',    options.property    ?? '');
+    this.defineProperty('value',       options.value       !== undefined ? options.value : undefined);
+    this.defineProperty('when',        options.when        !== undefined ? options.when : true);
+    this.defineProperty('restoreMode', options.restoreMode ?? BindingElement.RestoreBindingOrValue);
+
+    this._savedValue    = undefined;
+    this._savedBinding  = null;
+    this._active        = false;
+    this._whenDisconnect = null;
+
+    this.connect('targetChanged',      () => this._update());
+    this.connect('propertyChanged',    () => this._update());
+    this.connect('valueChanged',       () => { if (this._active) this._apply(); });
+
+    // Watch 'when' changes if it is a signal-emitting property
+    this.connect('whenChanged', (newVal) => {
+      if (newVal) {
+        this._activate();
+      } else {
+        this._deactivate();
+      }
+    });
+
+    this._update();
+  }
+
+  _update() {
+    const shouldActivate = !!(this.target && this.property && this.when);
+    if (shouldActivate) {
+      this._activate();
+    } else {
+      this._deactivate();
+    }
+  }
+
+  _activate() {
+    if (this._active) return;
+    const target = this.target;
+    const prop   = this.property;
+    if (!(target instanceof QObject) || !prop) return;
+
+    // Save the current value/binding so we can restore later
+    const def = target._propertyDefinitions && target._propertyDefinitions.get(prop);
+    if (def && def.binding) {
+      this._savedBinding = def.binding;
+    }
+    this._savedValue = target[prop];
+
+    this._active = true;
+    this._apply();
+  }
+
+  _apply() {
+    const target = this.target;
+    const prop   = this.property;
+    if (!(target instanceof QObject) || !prop) return;
+    const val = this.value;
+    if (val instanceof Binding) {
+      target._bindProperty(prop, val);
+    } else {
+      target[prop] = val;
+    }
+  }
+
+  _deactivate() {
+    if (!this._active) return;
+    this._active = false;
+    const target = this.target;
+    const prop   = this.property;
+    if (!(target instanceof QObject) || !prop) return;
+
+    const mode = this.restoreMode;
+    if (mode === BindingElement.RestoreBinding && this._savedBinding) {
+      target._bindProperty(prop, this._savedBinding);
+    } else if (mode === BindingElement.RestorePreviousValue) {
+      target[prop] = this._savedValue;
+    } else if (mode === BindingElement.RestoreBindingOrValue) {
+      if (this._savedBinding) {
+        target._bindProperty(prop, this._savedBinding);
+      } else if (this._savedValue !== undefined) {
+        target[prop] = this._savedValue;
+      }
+    }
+    // RestoreNone: do nothing
+    this._savedValue   = undefined;
+    this._savedBinding = null;
+  }
+
+  destroy() {
+    this._deactivate();
+    super.destroy();
+  }
+}
+
+BindingElement.RestoreNone             = 0;
+BindingElement.RestoreBinding          = 1;
+BindingElement.RestorePreviousValue    = 2;
+BindingElement.RestoreBindingOrValue   = 3;
 
 // ---------------------------------------------------------------------------
 // Easing functions
@@ -9579,238 +9974,6 @@ TextArea.Wrap       = 1;
 TextArea.WordWrap   = 2;
 TextArea.WrapAnywhere = 3;
 
-// ---------------------------------------------------------------------------
-// Step C: Timer
-// ---------------------------------------------------------------------------
-
-class Timer extends QObject {
-  constructor(options = {}) {
-    super();
-
-    this._elapsed  = 0;
-    this._ticker   = options.ticker || _globalTicker;
-
-    this.defineProperty('interval', options.interval !== undefined ? options.interval : 1000);
-    this.defineProperty('repeat',   options.repeat   !== undefined ? options.repeat   : false);
-    this.defineProperty('triggeredOnStart', options.triggeredOnStart !== undefined ? options.triggeredOnStart : false);
-
-    this.defineProperty('running', options.running !== undefined ? options.running : false, {
-      onChanged: (newVal) => {
-        if (newVal) {
-          this._elapsed = 0;
-          this._ticker.add(this);
-          if (this.triggeredOnStart) {
-            this._fireTriggered();
-          }
-        } else {
-          this._ticker.remove(this);
-        }
-      },
-    });
-
-    this.defineSignal('triggered');
-
-    // Allow options.running to kick off the ticker (onChanged fires during defineProperty
-    // only if value differs from default; supply running after other props are defined)
-    if (options.running) {
-      this.running = options.running;
-    }
-  }
-
-  _fireTriggered() {
-    this.triggered.emit();
-    if (typeof this.onTriggered === 'function') {
-      this.onTriggered.call(this);
-    }
-  }
-
-  _tick(dt) {
-    if (!this.running) return;
-
-    this._elapsed += dt;
-    if (this._elapsed >= this.interval) {
-      this._elapsed -= this.interval;
-      this._fireTriggered();
-      if (!this.repeat) {
-        // Set running to false; onChanged will remove from ticker
-        this.running = false;
-      }
-    }
-  }
-
-  start() {
-    this.running = true;
-  }
-
-  stop() {
-    this.running = false;
-  }
-
-  restart() {
-    this._elapsed = 0;
-    if (!this.running) {
-      this.running = true;
-    }
-  }
-
-  destroy() {
-    this.running = false;
-    super.destroy();
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Step C: Connections
-// ---------------------------------------------------------------------------
-
-class Connections extends QObject {
-  constructor(options = {}) {
-    super();
-
-    // Map of signalName → handler function (registered via connect())
-    this._pendingHandlers = new Map();
-    // Map of signalName → disconnect function (active connections to target)
-    this._disconnectors   = new Map();
-
-    this.defineProperty('target', null, {
-      onChanged: () => this._reconnect(),
-    });
-
-    this.defineProperty('enabled', true, {
-      onChanged: (newVal) => {
-        if (newVal) {
-          this._connectAll();
-        } else {
-          this._disconnectAll();
-        }
-      },
-    });
-
-    if ('target'  in options) this.target  = options.target;
-    if ('enabled' in options) this.enabled = options.enabled;
-  }
-
-  // Override connect() so codegen-generated signal-handler registrations
-  // (e.g.  object.connect('clicked', fn)  coming from  onClicked: {...} )
-  // are forwarded to the target instead of the Connections object itself.
-  connect(signalName, listener) {
-    if (typeof listener !== 'function') {
-      // Fall back to the standard QObject behaviour for non-handler uses
-      return super.connect(signalName, listener);
-    }
-
-    // Store and wire up as a forwarding handler
-    this._pendingHandlers.set(signalName, listener);
-    if (this.target && this.enabled) {
-      this._connectOne(signalName, listener);
-    }
-  }
-
-  _connectOne(signalName, handler) {
-    const target = this.target;
-    if (!target) return;
-    const signal = target[signalName];
-    if (signal && typeof signal.connect === 'function') {
-      const disconnector = signal.connect(handler);
-      this._disconnectors.set(signalName, disconnector);
-    }
-  }
-
-  _connectAll() {
-    if (!this.target) return;
-    for (const [signalName, handler] of this._pendingHandlers) {
-      if (!this._disconnectors.has(signalName)) {
-        this._connectOne(signalName, handler);
-      }
-    }
-  }
-
-  _disconnectAll() {
-    for (const disconnector of this._disconnectors.values()) {
-      if (typeof disconnector === 'function') disconnector();
-    }
-    this._disconnectors.clear();
-  }
-
-  _reconnect() {
-    this._disconnectAll();
-    if (this.enabled) {
-      this._connectAll();
-    }
-  }
-
-  destroy() {
-    this._disconnectAll();
-    super.destroy();
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Step C: BindingElement  (QML  Binding { target; property; value; when })
-// ---------------------------------------------------------------------------
-
-class BindingElement extends QObject {
-  constructor(options = {}) {
-    super();
-
-    this._active     = false;
-    this._savedValue = undefined;
-
-    this.defineProperty('target',   options.target   !== undefined ? options.target   : null);
-    this.defineProperty('property', options.property !== undefined ? options.property : '');
-    this.defineProperty('value',    options.value    !== undefined ? options.value    : null, {
-      onChanged: () => this._applyIfActive(),
-    });
-    this.defineProperty('when', options.when !== undefined ? options.when : true, {
-      onChanged: () => this._evaluate(),
-    });
-
-    // Wire target/property changes so when any of them change we re-evaluate
-    this.connect('targetChanged',   () => this._evaluate());
-    this.connect('propertyChanged', () => this._evaluate());
-
-    // Initial evaluation (deferred so the parent object tree is complete)
-    if (this.when) {
-      this._evaluate();
-    }
-  }
-
-  _evaluate() {
-    const shouldBeActive = !!(this.when && this.target && this.property);
-
-    if (shouldBeActive && !this._active) {
-      // Save the current value before we override it (best-effort)
-      try { this._savedValue = this.target[this.property]; } catch (_e) { /* property may not be readable */ }
-      this._active = true;
-      this._applyIfActive();
-    } else if (!shouldBeActive && this._active) {
-      this._active = false;
-      // Best-effort restore of the previous value
-      if (this.target && this.property && this._savedValue !== undefined) {
-        try { this.target[this.property] = this._savedValue; } catch (_e) { /* property may be read-only */ }
-      }
-      this._savedValue = undefined;
-    } else if (shouldBeActive) {
-      this._applyIfActive();
-    }
-  }
-
-  _applyIfActive() {
-    if (!this._active) return;
-    if (!this.target || !this.property) return;
-    try {
-      this.target[this.property] = this.value;
-    } catch (_e) { /* property may be read-only – best-effort application */ }
-  }
-
-  destroy() {
-    if (this._active && this.target && this.property && this._savedValue !== undefined) {
-      try { this.target[this.property] = this._savedValue; } catch (_e) { /* property may be read-only */ }
-    }
-    super.destroy();
-  }
-}
-
 const runtimeExports = {
   Signal,
   Binding,
@@ -9894,7 +10057,7 @@ const runtimeExports = {
   Drawer,
   SpinBox,
   TextArea,
-  // Step C: core QML utilities
+  // PR-C: core QML utilities
   Timer,
   Connections,
   BindingElement,
