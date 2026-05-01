@@ -641,6 +641,24 @@ function _invertMatrix(m) {
 const _textMeasureCache = new Map();
 
 /**
+ * Returns a lightweight canvas 2D context suitable for text measurement only.
+ * In browser environments a 1×1 OffscreenCanvas is created once and reused.
+ * Returns null in environments that do not support OffscreenCanvas (e.g. Node.js).
+ */
+let _offscreenMeasureCtx = null;
+function _getOffscreenMeasureCtx() {
+  if (_offscreenMeasureCtx) return _offscreenMeasureCtx;
+  if (typeof OffscreenCanvas !== 'undefined') {
+    try {
+      _offscreenMeasureCtx = new OffscreenCanvas(1, 1).getContext('2d');
+    } catch (_) {
+      // OffscreenCanvas present but unavailable (e.g. blocked) – stay null
+    }
+  }
+  return _offscreenMeasureCtx;
+}
+
+/**
  * Measure the pixel width of a string in the given CSS font string.
  * Results are memoised for the lifetime of the process / page.
  */
@@ -3654,13 +3672,30 @@ class Text extends Item {
     this._lineCache = null;
     this._lineCacheKey = null;
 
-    const invalidate = () => { this._lineCache = null; };
-    this.connect('textChanged', invalidate);
-    this.connect('fontChanged', invalidate);
-    this.connect('wrapModeChanged', invalidate);
-    this.connect('elideChanged', invalidate);
-    this.connect('maximumLineCountChanged', invalidate);
-    this.connect('widthChanged', invalidate);
+    // Last canvas 2D context used for rendering; reused for proactive measurement.
+    this._lastCtx = null;
+
+    const invalidateAndMeasure = () => {
+      this._lineCache = null;
+      this._proactiveMeasure();
+    };
+    this.connect('textChanged', invalidateAndMeasure);
+    this.connect('fontChanged', invalidateAndMeasure);
+    this.connect('wrapModeChanged', invalidateAndMeasure);
+    this.connect('elideChanged', invalidateAndMeasure);
+    this.connect('maximumLineCountChanged', invalidateAndMeasure);
+    this.connect('widthChanged', invalidateAndMeasure);
+  }
+
+  /**
+   * Re-measure implicit sizes using the best available canvas context.
+   * Uses the last render context when available, or falls back to an
+   * OffscreenCanvas context in browser environments.
+   * Does nothing in environments without canvas support (e.g. Node.js tests).
+   */
+  _proactiveMeasure() {
+    const ctx = this._lastCtx || _getOffscreenMeasureCtx();
+    if (ctx) this._measure(ctx);
   }
 
   /** Build a CSS font string from this item's font property. */
@@ -3746,6 +3781,31 @@ class Text extends Item {
             truncated = truncated.slice(0, -1);
           }
           lines[lines.length - 1] = truncated + '\u2026';
+        } else if (elide === 'left') {
+          let truncated = lastLine;
+          while (truncated.length > 0 && _measureTextWidth(context, fontString, '\u2026' + truncated) > w) {
+            truncated = truncated.slice(1);
+          }
+          lines[lines.length - 1] = '\u2026' + truncated;
+        } else if (elide === 'middle') {
+          const ellipsisW = _measureTextWidth(context, fontString, '\u2026');
+          const avail = w - ellipsisW;
+          if (avail <= 0) {
+            lines[lines.length - 1] = '\u2026';
+          } else {
+            const halfAvail = avail / 2;
+            let headEnd = 0;
+            for (let i = 1; i <= lastLine.length; i++) {
+              if (_measureTextWidth(context, fontString, lastLine.slice(0, i)) > halfAvail) break;
+              headEnd = i;
+            }
+            let tailStart = lastLine.length;
+            for (let i = 1; i <= lastLine.length - headEnd; i++) {
+              if (_measureTextWidth(context, fontString, lastLine.slice(lastLine.length - i)) > halfAvail) break;
+              tailStart = lastLine.length - i;
+            }
+            lines[lines.length - 1] = lastLine.slice(0, headEnd) + '\u2026' + lastLine.slice(tailStart);
+          }
         }
       }
     }
@@ -3786,6 +3846,8 @@ class Text extends Item {
 
   draw(context) {
     if (!context) return;
+    // Store context for proactive re-measurement on property changes.
+    this._lastCtx = context;
     const raw = String(this.text ?? '');
     if (!raw) return;
 
@@ -7487,14 +7549,20 @@ class LayoutContainer extends Item {
 
   static _prefW(child, la) {
     if (la.preferredWidth !== undefined && la.preferredWidth >= 0) return la.preferredWidth;
-    const cw = child.width || 0;
-    return cw > 0 ? cw : (child.implicitWidth || 0);
+    // Qt Quick Layouts: implicitWidth is the natural preferred size.
+    // Only use explicit width when no implicit size is available.
+    const implW = child.implicitWidth || 0;
+    if (implW > 0) return implW;
+    return child.width || 0;
   }
 
   static _prefH(child, la) {
     if (la.preferredHeight !== undefined && la.preferredHeight >= 0) return la.preferredHeight;
-    const ch = child.height || 0;
-    return ch > 0 ? ch : (child.implicitHeight || 0);
+    // Qt Quick Layouts: implicitHeight is the natural preferred size.
+    // Only use explicit height when no implicit size is available.
+    const implH = child.implicitHeight || 0;
+    if (implH > 0) return implH;
+    return child.height || 0;
   }
 
   static _minW(la) { return la.minimumWidth  !== undefined ? la.minimumWidth  : 0; }
