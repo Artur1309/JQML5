@@ -1368,6 +1368,61 @@ class Component {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Qt – namespace object with constants and utility helpers (PR-C enhanced)
+// ---------------------------------------------------------------------------
+
+const Qt = {
+  LeftEdge:   1,
+  RightEdge:  2,
+  TopEdge:    4,
+  BottomEdge: 8,
+  // Orientation
+  Horizontal: 1,
+  Vertical:   2,
+  // Alignment (mirrors codegen constants)
+  AlignLeft:    'left',
+  AlignRight:   'right',
+  AlignHCenter: 'center',
+  AlignTop:     'top',
+  AlignBottom:  'bottom',
+  AlignVCenter: 'vcenter',
+
+  // ---------------------------------------------------------------------------
+  // PR-C: Qt.createComponent and Qt.createQmlObject
+  // ---------------------------------------------------------------------------
+  _componentRegistry: new Map(),
+
+  registerComponent(url, factoryOrComponent) {
+    Qt._componentRegistry.set(url, factoryOrComponent);
+  },
+
+  createComponent(url) {
+    const entry = Qt._componentRegistry.get(url);
+    if (entry instanceof Component) {
+      return entry;
+    }
+    if (typeof entry === 'function') {
+      return new Component(entry);
+    }
+    // Return an error stub
+    const stub = new Component(() => null);
+    stub._url   = url;
+    stub._error = `createComponent: component not found: "${url}"`;
+    return stub;
+  },
+
+  createQmlObject(qmlStringOrFactory, parent, _fileName) {
+    if (typeof qmlStringOrFactory === 'function') {
+      const comp = new Component(qmlStringOrFactory);
+      return comp.createObject(parent instanceof QObject ? parent : null);
+    }
+    console.warn('Qt.createQmlObject: runtime QML string evaluation is not supported; ' +
+      'pass a compiled factory function instead.');
+    return null;
+  },
+};
+
 class Loader extends Item {
   constructor(options = {}) {
     super(options);
@@ -1377,7 +1432,7 @@ class Loader extends Item {
     // Status constants (mirrors Qt enum)
     // Loader.Null = 0, Loader.Ready = 1, Loader.Loading = 2, Loader.Error = 3
 
-    this.defineProperty('source', options.source ?? '', {
+    this.defineProperty('source', '', {
       onChanged: () => this._reload(),
     });
 
@@ -1392,13 +1447,17 @@ class Loader extends Item {
     this.defineProperty('asynchronous', options.asynchronous ?? false);
 
     this.defineProperty('status', Loader.Null, { readOnly: true });
-    this.defineProperty('progress', 0.0, { readOnly: true });
+    this.defineProperty('progress', 0, { readOnly: true });
 
     this.defineProperty('item', null, {
       readOnly: true,
     });
 
     this.defineSignal('loaded');
+
+    if ('source' in options) {
+      this.source = options.source;
+    }
 
     if ('sourceComponent' in options) {
       this.sourceComponent = options.sourceComponent;
@@ -1412,29 +1471,19 @@ class Loader extends Item {
     this._reload();
   }
 
-  _setItem(value) {
-    const definition = this._propertyDefinitions.get('item');
+  _setReadOnlyProp(name, value) {
+    const definition = this._propertyDefinitions.get(name);
     const previousReadOnly = definition.readOnly;
     definition.readOnly = false;
     try {
-      this._setPropertyValue('item', value);
+      this._setPropertyValue(name, value);
     } finally {
       definition.readOnly = previousReadOnly;
     }
   }
 
-  _setStatus(value) {
-    const def = this._propertyDefinitions.get('status');
-    const prev = def.readOnly;
-    def.readOnly = false;
-    try { this._setPropertyValue('status', value); } finally { def.readOnly = prev; }
-  }
-
-  _setProgress(value) {
-    const def = this._propertyDefinitions.get('progress');
-    const prev = def.readOnly;
-    def.readOnly = false;
-    try { this._setPropertyValue('progress', value); } finally { def.readOnly = prev; }
+  _setItem(value) {
+    this._setReadOnlyProp('item', value);
   }
 
   _unload() {
@@ -1442,8 +1491,8 @@ class Loader extends Item {
       this.item.destroy();
       this._setItem(null);
     }
-    this._setStatus(Loader.Null);
-    this._setProgress(0);
+    this._setReadOnlyProp('status', Loader.Null);
+    this._setReadOnlyProp('progress', 0);
   }
 
   _reload() {
@@ -1456,36 +1505,34 @@ class Loader extends Item {
       this._unload();
 
       if (!this.active) {
+        this._setReadOnlyProp('status', Loader.Null);
+        this._setReadOnlyProp('progress', 0);
         return;
       }
 
-      // Prefer sourceComponent over source
+      // Resolve component from sourceComponent or source URL
       let component = null;
       if (this.sourceComponent instanceof Component) {
         component = this.sourceComponent;
-      } else if (typeof this.source === 'string' && this.source !== '') {
-        // source URL: resolve via Qt.createComponent if available; otherwise null
-        const created = typeof _qtCreateComponent === 'function'
-          ? _qtCreateComponent(this.source, this)
-          : null;
-        if (created instanceof Component) {
-          component = created;
-        } else {
-          this._setStatus(Loader.Error);
-          return;
+      } else if (this.source && typeof this.source === 'string') {
+        // Use Qt.createComponent if a component has been registered for this URL
+        if (typeof Qt !== 'undefined' && typeof Qt.createComponent === 'function') {
+          component = Qt.createComponent(this.source);
         }
-      } else {
+      }
+
+      if (!component) {
+        const hasSource = !!(this.source || this.sourceComponent);
+        this._setReadOnlyProp('status', hasSource ? Loader.Error : Loader.Null);
+        this._setReadOnlyProp('progress', 0);
         return;
       }
 
-      this._setStatus(Loader.Loading);
-      this._setProgress(0);
+      this._setReadOnlyProp('status', Loader.Loading);
+      this._setReadOnlyProp('progress', 0);
 
       const doLoad = () => {
         if (this._destroying) return;
-        // Parent the loaded item to the Loader itself so it participates in
-        // the Loader's geometry.  The item can still use anchors or set its
-        // own x/y/width/height relative to the Loader.
         const instance = component.createObject(
           this,
           {},
@@ -1493,12 +1540,12 @@ class Loader extends Item {
           this.getComponentScope(),
         );
         this._setItem(instance);
-        this._setProgress(1.0);
-        this._setStatus(Loader.Ready);
-        if (this.onLoaded) {
-          try { this.onLoaded(); } catch (_) { /* ignore */ }
-        }
+        this._setReadOnlyProp('status', Loader.Ready);
+        this._setReadOnlyProp('progress', 1);
         this.loaded.emit();
+        if (typeof this.onLoaded === 'function') {
+          this.onLoaded.call(this);
+        }
       };
 
       if (this.asynchronous) {
@@ -1511,6 +1558,9 @@ class Loader extends Item {
       } else {
         doLoad();
       }
+    } catch (_err) {
+      this._setReadOnlyProp('status', Loader.Error);
+      this._setReadOnlyProp('progress', 0);
     } finally {
       if (!this.asynchronous) {
         this._loading = false;
@@ -1548,6 +1598,8 @@ class Timer extends QObject {
     this._timerId    = null;
     this._tickerObj  = null;
     this._elapsed    = 0;
+    // Allow a custom ticker to be injected (useful for tests).
+    this._ticker     = options.ticker || _globalTicker;
 
     this.connect('runningChanged', (running) => {
       if (running) {
@@ -1574,14 +1626,14 @@ class Timer extends QObject {
     this._elapsed = 0;
 
     if (this.triggeredOnStart) {
-      this.triggered.emit();
+      this._fire();
       if (!this.repeat) {
         this._setPropertyValue('running', false);
         return;
       }
     }
 
-    // Use _globalTicker so we work in both browser and Node environments.
+    // Register with the ticker (global or injected).
     this._elapsed = 0;
     this._tickerObj = {
       _tick: (dt) => {
@@ -1592,7 +1644,7 @@ class Timer extends QObject {
         this._elapsed += dt;
         if (this._elapsed >= this.interval) {
           this._elapsed -= this.interval;
-          this.triggered.emit();
+          this._fire();
           if (!this.repeat) {
             this._setPropertyValue('running', false);
             this._stop();
@@ -1600,12 +1652,19 @@ class Timer extends QObject {
         }
       },
     };
-    _globalTicker.add(this._tickerObj);
+    this._ticker.add(this._tickerObj);
+  }
+
+  _fire() {
+    this.triggered.emit();
+    if (typeof this.onTriggered === 'function') {
+      this.onTriggered.call(this);
+    }
   }
 
   _stop() {
     if (this._tickerObj) {
-      _globalTicker.remove(this._tickerObj);
+      this._ticker.remove(this._tickerObj);
       this._tickerObj = null;
     }
     this._elapsed = 0;
@@ -1646,33 +1705,56 @@ class Connections extends QObject {
   constructor(options = {}) {
     super();
 
-    this._disconnectors = [];
-    this._handlers = {};
+    // Map of signalName → handler function
+    this._pendingHandlers = new Map();
+    // Map of signalName → disconnect function (active connections to target)
+    this._targetDisconnectors = new Map();
 
-    this.defineProperty('target', options.target ?? null, {
-      onChanged: (newTarget, oldTarget) => this._reconnect(newTarget, oldTarget),
+    this.defineProperty('target', null, {
+      onChanged: () => this._reconnect(),
     });
 
-    this.defineProperty('enabled', options.enabled !== undefined ? options.enabled : true, {
-      onChanged: () => {
-        // When re-enabled, re-read pending handler assignments.
-        if (this.enabled) {
-          this._reconnect(this.target, null);
+    this.defineProperty('enabled', true, {
+      onChanged: (newVal) => {
+        if (newVal) {
+          this._connectAll();
         } else {
           this._disconnectAll();
         }
       },
     });
 
+    if ('target'  in options) this.target  = options.target;
+    if ('enabled' in options) this.enabled = options.enabled;
+
     // Accept handler functions passed as options (e.g. { onClicked: () => {} })
     for (const [key, value] of Object.entries(options)) {
-      if (key.startsWith('on') && key.length > 2 && typeof value === 'function') {
-        this._handlers[key] = value;
+      if (key.startsWith('on') && key.length > 3 &&
+          key[2] === key[2].toUpperCase() && typeof value === 'function') {
+        const signalName = key[2].toLowerCase() + key.slice(3);
+        this.connect(signalName, value);
       }
     }
+  }
 
-    if (this.target) {
-      this._reconnect(this.target, null);
+  /**
+   * Override connect() to forward signal handlers to the target.
+   * When signalName is a known QObject signal registration pattern, store
+   * the handler and wire it directly to target[signalName].
+   */
+  connect(signalName, listener) {
+    if (typeof listener !== 'function') {
+      return super.connect(signalName, listener);
+    }
+    // Disconnect old handler for this signal if already wired
+    if (this._targetDisconnectors.has(signalName)) {
+      const old = this._targetDisconnectors.get(signalName);
+      try { if (typeof old === 'function') old(); } catch (_) { /* ignore */ }
+      this._targetDisconnectors.delete(signalName);
+    }
+    this._pendingHandlers.set(signalName, listener);
+    if (this.target && this.enabled) {
+      this._connectOne(signalName, listener);
     }
   }
 
@@ -1681,56 +1763,50 @@ class Connections extends QObject {
    * handlerName should be in the Qt style: 'onSignalName'.
    */
   setHandler(handlerName, fn) {
-    // Must match Qt naming: 'on' followed by an uppercase letter and a name
     if (!handlerName.startsWith('on') ||
         handlerName.length < 3 ||
         handlerName[2] !== handlerName[2].toUpperCase() ||
         handlerName[2] === handlerName[2].toLowerCase()) {
       throw new Error(`Connections: handler name must start with "on" followed by an uppercase letter, got "${handlerName}"`);
     }
-    this._handlers[handlerName] = fn;
-    // Re-wire if already connected
-    if (this.target && this.enabled) {
-      this._disconnectAll();
-      this._connectTo(this.target);
-    }
+    const signalName = handlerName[2].toLowerCase() + handlerName.slice(3);
+    this.connect(signalName, fn);
   }
 
-  _signalNameFromHandler(handlerName) {
-    // 'onClicked' -> 'clicked', 'onSomeSignal' -> 'someSignal'
-    return handlerName[2].toLowerCase() + handlerName.slice(3);
-  }
-
-  _disconnectAll() {
-    for (const disconnect of this._disconnectors) {
-      try { disconnect(); } catch (_) { /* ignore */ }
-    }
-    this._disconnectors = [];
-  }
-
-  _connectTo(target) {
+  _connectOne(signalName, handler) {
+    const target = this.target;
     if (!(target instanceof QObject)) return;
-    for (const [handlerName, fn] of Object.entries(this._handlers)) {
-      if (typeof fn !== 'function') continue;
-      const signalName = this._signalNameFromHandler(handlerName);
-      try {
-        const disconnect = target.connect(signalName, (...args) => {
-          if (!this.enabled) return;
-          fn.apply(target, args);
-        });
-        if (typeof disconnect === 'function') {
-          this._disconnectors.push(disconnect);
-        }
-      } catch (_) {
-        // Signal may not exist on this target – silently skip
+    try {
+      const sig = target.signal ? target.signal(signalName) : null;
+      if (sig && typeof sig.connect === 'function') {
+        const disconnector = sig.connect(handler);
+        this._targetDisconnectors.set(signalName, disconnector);
+      }
+    } catch (_) {
+      // Signal may not exist – silently skip
+    }
+  }
+
+  _connectAll() {
+    if (!this.target) return;
+    for (const [signalName, handler] of this._pendingHandlers) {
+      if (!this._targetDisconnectors.has(signalName)) {
+        this._connectOne(signalName, handler);
       }
     }
   }
 
-  _reconnect(newTarget, _oldTarget) {
+  _disconnectAll() {
+    for (const disconnector of this._targetDisconnectors.values()) {
+      try { if (typeof disconnector === 'function') disconnector(); } catch (_) { /* ignore */ }
+    }
+    this._targetDisconnectors.clear();
+  }
+
+  _reconnect() {
     this._disconnectAll();
-    if (newTarget && this.enabled) {
-      this._connectTo(newTarget);
+    if (this.enabled) {
+      this._connectAll();
     }
   }
 
@@ -5016,10 +5092,10 @@ class ListView extends Flickable {
     this._disconnectModel();
     if (newModel instanceof ListModel) {
       this._modelDisconnectors.push(
-        newModel.rowsInserted.connect(() => this._rebuild()),
+        newModel.rowsInserted.connect((index, count) => this._onRowsInserted(index, count)),
       );
       this._modelDisconnectors.push(
-        newModel.rowsRemoved.connect(() => this._rebuild()),
+        newModel.rowsRemoved.connect((index, count) => this._onRowsRemoved(index, count)),
       );
       this._modelDisconnectors.push(
         newModel.rowsMoved.connect(() => this._rebuild()),
@@ -5029,6 +5105,81 @@ class ListView extends Flickable {
       );
     }
     this._rebuild();
+  }
+
+  // -----------------------------------------------------------------------
+  // Incremental model change handlers
+  // -----------------------------------------------------------------------
+
+  // Insert `insertCount` items at `index` without a full rebuild.
+  _onRowsInserted(index, insertCount) {
+    if (this._rebuilding) return;
+    // Disconnect all size listeners; they will be reconnected below.
+    for (let i = 0; i < this._sizeDisconnectors.length; i++) {
+      this._disconnectSizeListener(i);
+    }
+    this._sizeDisconnectors = [];
+
+    // Splice null slots into the delegate and size-cache arrays.
+    this._delegateItems.splice(index, 0, ...new Array(insertCount).fill(null));
+    this._sizeCache.splice(index, 0, ...new Array(insertCount).fill(undefined));
+
+    // Reconnect size listeners for items that remain in the array.
+    for (let i = 0; i < this._delegateItems.length; i++) {
+      if (this._delegateItems[i]) {
+        this._connectSizeListener(this._delegateItems[i], i);
+      }
+    }
+
+    this._buildPrefixSums();
+    this._setPropertyValue('count', _modelCount(this.model));
+    this._updateContentSize();
+    this._positionFooter();
+    this._positionAllVisible();
+    this._updateVirtualization();
+  }
+
+  // Remove `removeCount` items starting at `index` without a full rebuild.
+  _onRowsRemoved(index, removeCount) {
+    if (this._rebuilding) return;
+    // Disconnect all size listeners.
+    for (let i = 0; i < this._sizeDisconnectors.length; i++) {
+      this._disconnectSizeListener(i);
+    }
+    this._sizeDisconnectors = [];
+
+    // Pool or destroy the removed delegate items.
+    for (let i = index; i < index + removeCount; i++) {
+      const item = this._delegateItems[i];
+      if (item) {
+        if (this.reuseItems && this._reusePool.length < this._maxPoolSize) {
+          item.visible = false;
+          ListView._invokeAttachedHandler(item, 'onPooled');
+          this.pooled.emit(item, i);
+          this._reusePool.push(item);
+        } else {
+          item.destroy();
+        }
+      }
+    }
+
+    // Splice out the removed slots.
+    this._delegateItems.splice(index, removeCount);
+    this._sizeCache.splice(index, removeCount);
+
+    // Reconnect size listeners for the remaining items (indices shifted).
+    for (let i = 0; i < this._delegateItems.length; i++) {
+      if (this._delegateItems[i]) {
+        this._connectSizeListener(this._delegateItems[i], i);
+      }
+    }
+
+    this._buildPrefixSums();
+    this._setPropertyValue('count', _modelCount(this.model));
+    this._updateContentSize();
+    this._positionFooter();
+    this._positionAllVisible();
+    this._updateVirtualization();
   }
 
   // -----------------------------------------------------------------------
@@ -5508,6 +5659,605 @@ class ListView extends Flickable {
       hi.destroy();
       this._setPropertyValue('highlightItem', null);
     }
+    super.destroy();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Stage D: GridView – virtualized grid with pooling/reuse
+// ---------------------------------------------------------------------------
+
+class GridView extends Flickable {
+  constructor(options = {}) {
+    super(options);
+
+    this._delegateItems = [];        // sparse array of delegate instances
+    this._modelDisconnectors = [];
+    this._rebuilding = false;
+
+    // Header / footer item instances
+    this._headerItem = null;
+    this._footerItem = null;
+
+    // Reuse pool
+    this._reusePool = [];
+    this._maxPoolSize = 20;
+
+    this.defineProperty('model', null);
+    this.defineProperty('delegate', null);
+    // Cell dimensions (uniform, matching Qt GridView behaviour)
+    this.defineProperty('cellWidth', 100);
+    this.defineProperty('cellHeight', 100);
+    // Spacing between cells on both axes
+    this.defineProperty('spacing', 0);
+    this.defineProperty('cacheBuffer', 40);
+    this.defineProperty('reuseItems', false);
+
+    // flow: 'LeftToRight' (row-first, default) or 'TopToBottom' (column-first)
+    this.defineProperty('flow', 'LeftToRight');
+
+    // Header / footer components
+    this.defineProperty('header', null);
+    this.defineProperty('footer', null);
+
+    // Selection / current
+    this.defineProperty('currentIndex', -1);
+    this.defineProperty('currentItem', null);
+    this.defineProperty('highlight', null);
+    this.defineProperty('highlightItem', null);
+    this.defineProperty('highlightFollowsCurrentItem', true);
+
+    // Read-only count mirror
+    this.defineProperty('count', 0);
+
+    // Delegate reuse signals
+    this.defineSignal('pooled');
+    this.defineSignal('reused');
+
+    this.focusable = true;
+
+    // Wire up change listeners
+    this.connect('modelChanged', (newModel, oldModel) => this._onModelReplaced(newModel, oldModel));
+    this.connect('delegateChanged', () => this._rebuild());
+    this.connect('cellWidthChanged', () => this._rebuild());
+    this.connect('cellHeightChanged', () => this._rebuild());
+    this.connect('spacingChanged', () => this._rebuild());
+    this.connect('flowChanged', () => this._rebuild());
+    this.connect('contentYChanged', () => this._updateVirtualization());
+    this.connect('contentXChanged', () => this._updateVirtualization());
+    this.connect('heightChanged', () => this._rebuild());
+    this.connect('widthChanged', () => this._rebuild());
+    this.connect('currentIndexChanged', () => this._onCurrentIndexChanged());
+    this.connect('highlightChanged', () => this._onHighlightChanged());
+    this.connect('headerChanged', () => this._onHeaderFooterChanged('header'));
+    this.connect('footerChanged', () => this._onHeaderFooterChanged('footer'));
+
+    this.keys.onPressed = (event) => this._handleGridViewKey(event);
+
+    if (options.model !== undefined) this.model = options.model;
+    if (options.delegate !== undefined) this.delegate = options.delegate;
+    if (options.cellWidth !== undefined) this.cellWidth = options.cellWidth;
+    if (options.cellHeight !== undefined) this.cellHeight = options.cellHeight;
+    if (options.flow !== undefined) this.flow = options.flow;
+    if (options.spacing !== undefined) this.spacing = options.spacing;
+  }
+
+  // -----------------------------------------------------------------------
+  // Layout helpers
+  // -----------------------------------------------------------------------
+
+  // Is the flow LeftToRight (row-first)?
+  _isRowFlow() {
+    return (this.flow || 'LeftToRight') !== 'TopToBottom';
+  }
+
+  // Number of columns when flow=LeftToRight.
+  _columnsPerRow() {
+    const vw = this.width || 0;
+    const cw = (this.cellWidth || 100);
+    const sp = this.spacing || 0;
+    if (cw <= 0) return 1;
+    return Math.max(1, Math.floor((vw + sp) / (cw + sp)));
+  }
+
+  // Number of rows when flow=TopToBottom.
+  _rowsPerColumn() {
+    const vh = this.height || 0;
+    const ch = (this.cellHeight || 100);
+    const sp = this.spacing || 0;
+    if (ch <= 0) return 1;
+    return Math.max(1, Math.floor((vh + sp) / (ch + sp)));
+  }
+
+  // Cell (col, row) for a given linear index.
+  _cellPos(index) {
+    if (this._isRowFlow()) {
+      const cols = this._columnsPerRow();
+      return { col: index % cols, row: Math.floor(index / cols) };
+    }
+    const rows = this._rowsPerColumn();
+    return { col: Math.floor(index / rows), row: index % rows };
+  }
+
+  // Pixel position of a cell in content space (before adding headerSize).
+  _itemPixelPos(index) {
+    const { col, row } = this._cellPos(index);
+    const sp = this.spacing || 0;
+    return {
+      x: col * ((this.cellWidth || 100) + sp),
+      y: row * ((this.cellHeight || 100) + sp),
+    };
+  }
+
+  // Total rows spanned by the content (LeftToRight flow).
+  _totalContentRows() {
+    const count = _modelCount(this.model);
+    if (count === 0) return 0;
+    if (this._isRowFlow()) {
+      return Math.ceil(count / this._columnsPerRow());
+    }
+    // TopToBottom: items fill fixed-height rows and create additional columns as needed.
+    // Content height only spans the rows actually used (min of count and row capacity).
+    return Math.min(count, this._rowsPerColumn());
+  }
+
+  // Total columns spanned by the content (TopToBottom flow).
+  _totalContentColumns() {
+    const count = _modelCount(this.model);
+    if (count === 0) return 0;
+    if (!this._isRowFlow()) {
+      return Math.ceil(count / this._rowsPerColumn());
+    }
+    return this._columnsPerRow();
+  }
+
+  _headerSize() {
+    return this._headerItem ? (this._headerItem.height || 0) : 0;
+  }
+
+  _footerSize() {
+    return this._footerItem ? (this._footerItem.height || 0) : 0;
+  }
+
+  _delegateAreaHeight() {
+    const rows = this._totalContentRows();
+    if (rows === 0) return 0;
+    const sp = this.spacing || 0;
+    return rows * (this.cellHeight || 100) + (rows - 1) * sp;
+  }
+
+  _delegateAreaWidth() {
+    const cols = this._totalContentColumns();
+    if (cols === 0) return 0;
+    const sp = this.spacing || 0;
+    return cols * (this.cellWidth || 100) + (cols - 1) * sp;
+  }
+
+  _updateContentSize() {
+    const dh = this._delegateAreaHeight();
+    const total = this._headerSize() + dh + this._footerSize();
+    this._setPropertyValue('contentHeight', total);
+    this._setPropertyValue('contentWidth', Math.max(this.width || 0, this._delegateAreaWidth()));
+  }
+
+  // -----------------------------------------------------------------------
+  // Visible index range
+  // -----------------------------------------------------------------------
+
+  _visibleIndexRange() {
+    const count = _modelCount(this.model);
+    if (count === 0) return { first: 0, last: -1 };
+
+    const buffer = this.cacheBuffer || 0;
+    const headerS = this._headerSize();
+
+    if (this._isRowFlow()) {
+      const cols = this._columnsPerRow();
+      const ch = this.cellHeight || 100;
+      const sp = this.spacing || 0;
+      const rowStep = ch + sp;
+      const viewH = this.height || 0;
+      const scrollY = Math.max(0, (this.contentY || 0) - headerS);
+
+      const firstRow = Math.max(0, Math.floor((scrollY - buffer) / rowStep));
+      // A row is visible if its top edge is strictly before scrollY + viewH + buffer.
+      // Using ceil-based arithmetic ensures that a row whose top edge lands exactly
+      // on the viewport bottom boundary is NOT included, matching Qt GridView behaviour.
+      const lastRowExclusive = Math.ceil((scrollY + viewH + buffer) / rowStep);
+      const lastRow = Math.max(firstRow, lastRowExclusive - 1);
+
+      const first = firstRow * cols;
+      const last = Math.min(count - 1, (lastRow + 1) * cols - 1);
+      return { first, last };
+    }
+
+    // TopToBottom: items fill columns first; scroll is horizontal
+    const rows = this._rowsPerColumn();
+    const cw = this.cellWidth || 100;
+    const sp = this.spacing || 0;
+    const colStep = cw + sp;
+    const viewW = this.width || 0;
+    const scrollX = Math.max(0, this.contentX || 0);
+
+    const firstCol = Math.max(0, Math.floor((scrollX - buffer) / colStep));
+    const lastColExclusive = Math.ceil((scrollX + viewW + buffer) / colStep);
+    const lastCol = Math.max(firstCol, lastColExclusive - 1);
+
+    const first = firstCol * rows;
+    const last = Math.min(count - 1, (lastCol + 1) * rows - 1);
+    return { first, last };
+  }
+
+  // -----------------------------------------------------------------------
+  // Attached handler support (Qt-like GridView.onPooled / GridView.onReused)
+  // -----------------------------------------------------------------------
+
+  static _getAttached(item) {
+    if (!item._gridViewAttached) {
+      item._gridViewAttached = { onPooled: null, onReused: null };
+    }
+    return item._gridViewAttached;
+  }
+
+  static _invokeAttachedHandler(item, handlerName) {
+    const bag = item._gridViewAttached;
+    if (!bag) return;
+    const fn = bag[handlerName];
+    if (typeof fn === 'function') fn.call(item);
+  }
+
+  // -----------------------------------------------------------------------
+  // Model helpers
+  // -----------------------------------------------------------------------
+
+  _disconnectModel() {
+    for (const d of this._modelDisconnectors) d();
+    this._modelDisconnectors = [];
+  }
+
+  _onModelReplaced(newModel, _oldModel) {
+    this._disconnectModel();
+    if (newModel instanceof ListModel) {
+      this._modelDisconnectors.push(
+        newModel.rowsInserted.connect(() => this._rebuild()),
+        newModel.rowsRemoved.connect(() => this._rebuild()),
+        newModel.rowsMoved.connect(() => this._rebuild()),
+        newModel.dataChanged.connect((index) => this._onDataChanged(index)),
+      );
+    }
+    this._rebuild();
+  }
+
+  _onDataChanged(index) {
+    const old = this._delegateItems[index];
+    if (old) {
+      old.destroy();
+      this._delegateItems[index] = null;
+    }
+    this._updateVirtualization();
+  }
+
+  // -----------------------------------------------------------------------
+  // Header / footer
+  // -----------------------------------------------------------------------
+
+  _onHeaderFooterChanged(which) {
+    const isHeader = which === 'header';
+    const existingItem = isHeader ? this._headerItem : this._footerItem;
+    if (existingItem) existingItem.destroy();
+    if (isHeader) this._headerItem = null;
+    else this._footerItem = null;
+
+    const value = isHeader ? this.header : this.footer;
+    let created = null;
+    if (value instanceof Component) {
+      created = value.createObject(this, {}, this.getContext(), this.getComponentScope());
+    } else if (value instanceof Item) {
+      created = value;
+      created.parentItem = this;
+    }
+    if (created) {
+      created.x = 0;
+      created.y = isHeader ? 0 : this._headerSize() + this._delegateAreaHeight();
+    }
+    if (isHeader) this._headerItem = created;
+    else this._footerItem = created;
+    this._rebuild();
+  }
+
+  _positionFooter() {
+    if (!this._footerItem) return;
+    this._footerItem.y = this._headerSize() + this._delegateAreaHeight();
+    this._footerItem.x = 0;
+  }
+
+  // -----------------------------------------------------------------------
+  // Rebuild / virtualization
+  // -----------------------------------------------------------------------
+
+  _rebuild() {
+    if (this._rebuilding) return;
+    this._rebuilding = true;
+    try {
+      for (const item of this._reusePool) item.destroy();
+      this._reusePool = [];
+      for (const item of this._delegateItems) {
+        if (item) item.destroy();
+      }
+      this._delegateItems = [];
+
+      const count = _modelCount(this.model);
+      this._delegateItems = new Array(count).fill(null);
+      this._setPropertyValue('count', count);
+      this._updateContentSize();
+      this._positionFooter();
+      this._updateVirtualization();
+    } finally {
+      this._rebuilding = false;
+    }
+  }
+
+  _updateVirtualization() {
+    const count = _modelCount(this.model);
+    if (count === 0 || !(this.delegate instanceof Component)) {
+      this._setPropertyValue('count', 0);
+      this._updateContentSize();
+      this._positionFooter();
+      return;
+    }
+
+    this._setPropertyValue('count', count);
+    this._updateContentSize();
+    this._positionFooter();
+
+    const { first, last } = this._visibleIndexRange();
+
+    if (this._delegateItems.length < count) {
+      this._delegateItems.length = count;
+    }
+
+    // Pool or destroy items outside visible range
+    for (let i = 0; i < this._delegateItems.length; i++) {
+      const item = this._delegateItems[i];
+      if (item && (i < first || i > last)) {
+        if (this.reuseItems && this._reusePool.length < this._maxPoolSize) {
+          item.visible = false;
+          GridView._invokeAttachedHandler(item, 'onPooled');
+          this.pooled.emit(item, i);
+          this._reusePool.push(item);
+        } else {
+          item.destroy();
+        }
+        this._delegateItems[i] = null;
+      }
+    }
+
+    // Create/reuse and position items in visible range
+    for (let i = first; i <= last && i < count; i++) {
+      if (!this._delegateItems[i]) {
+        this._delegateItems[i] = this._reuseOrCreateAt(i);
+      }
+      if (this._delegateItems[i]) {
+        this._positionItem(i);
+      }
+    }
+
+    // Sync currentItem reference
+    const ci = this.currentIndex;
+    if (ci >= 0 && ci < count) {
+      this._setPropertyValue('currentItem', this._delegateItems[ci] ?? null);
+    }
+
+    this._updateHighlight();
+  }
+
+  _positionItem(index) {
+    const item = this._delegateItems[index];
+    if (!item) return;
+    const headerS = this._headerSize();
+    const pos = this._itemPixelPos(index);
+    item.x = pos.x;
+    item.y = headerS + pos.y;
+    // Enforce cell dimensions on delegates so they fill the cell.
+    item.width = this.cellWidth || 100;
+    item.height = this.cellHeight || 100;
+  }
+
+  // -----------------------------------------------------------------------
+  // Delegate creation with reuse pool
+  // -----------------------------------------------------------------------
+
+  _createAt(index) {
+    const delegate = this.delegate;
+    if (!(delegate instanceof Component)) return null;
+    const model = this.model;
+    const rowData = _modelRowData(model, index);
+    const ctx = _buildDelegateContext(this.getContext(), model, index, rowData);
+    return delegate.createObject(this, {}, ctx, this.getComponentScope());
+  }
+
+  _reuseOrCreateAt(index) {
+    if (this._reusePool.length > 0) {
+      const item = this._reusePool.pop();
+      const model = this.model;
+      const rowData = _modelRowData(model, index);
+      const ctx = _buildDelegateContext(this.getContext(), model, index, rowData);
+      item.setContext(ctx);
+      this._reevaluateBindings(item);
+      item.visible = true;
+      GridView._invokeAttachedHandler(item, 'onReused');
+      this.reused.emit(item, index);
+      return item;
+    }
+    return this._createAt(index);
+  }
+
+  _reevaluateBindings(item) {
+    for (const [name, state] of item._propertyBindings.entries()) {
+      for (const disconnect of state.dependencies.values()) disconnect();
+      state.dependencies.clear();
+      item._evaluateBinding(name, state);
+    }
+    for (const child of item._children) {
+      if (child instanceof QObject) this._reevaluateBindings(child);
+    }
+  }
+
+  // -----------------------------------------------------------------------
+  // Selection / current index
+  // -----------------------------------------------------------------------
+
+  _onCurrentIndexChanged() {
+    const count = _modelCount(this.model);
+    const ci = this.currentIndex;
+    const valid = ci >= 0 && ci < count;
+
+    if (valid) {
+      if (!this._delegateItems[ci] && this.delegate instanceof Component) {
+        if (this._delegateItems.length <= ci) this._delegateItems.length = ci + 1;
+        this._delegateItems[ci] = this._reuseOrCreateAt(ci);
+        if (this._delegateItems[ci]) this._positionItem(ci);
+      }
+      this._setPropertyValue('currentItem', this._delegateItems[ci] ?? null);
+    } else {
+      this._setPropertyValue('currentItem', null);
+    }
+
+    if (valid) this._scrollToCurrentIfNeeded();
+    this._updateHighlight();
+  }
+
+  _scrollToCurrentIfNeeded() {
+    const ci = this.currentIndex;
+    if (ci < 0) return;
+    const headerS = this._headerSize();
+    const pos = this._itemPixelPos(ci);
+    const itemTop = headerS + pos.y;
+    const itemBottom = itemTop + (this.cellHeight || 100);
+    const viewTop = this.contentY || 0;
+    const viewBottom = viewTop + (this.height || 0);
+    if (itemTop < viewTop) {
+      this.contentY = this._clampY(itemTop);
+    } else if (itemBottom > viewBottom) {
+      this.contentY = this._clampY(itemBottom - (this.height || 0));
+    }
+  }
+
+  // -----------------------------------------------------------------------
+  // Highlight
+  // -----------------------------------------------------------------------
+
+  _onHighlightChanged() {
+    const existing = this.highlightItem;
+    if (existing) {
+      existing.destroy();
+      this._setPropertyValue('highlightItem', null);
+    }
+    const h = this.highlight;
+    let hi = null;
+    if (h instanceof Component) {
+      hi = h.createObject(this, {}, this.getContext(), this.getComponentScope());
+    } else if (h instanceof Item) {
+      hi = h;
+      hi.parentItem = this;
+    }
+    if (hi) hi.z = -1;
+    this._setPropertyValue('highlightItem', hi);
+    this._updateHighlight();
+  }
+
+  _updateHighlight() {
+    const hi = this.highlightItem;
+    if (!hi || !this.highlightFollowsCurrentItem) return;
+    const ci = this.currentIndex;
+    if (ci < 0 || ci >= _modelCount(this.model)) {
+      hi.visible = false;
+      return;
+    }
+    const headerS = this._headerSize();
+    const pos = this._itemPixelPos(ci);
+    hi.x = pos.x;
+    hi.y = headerS + pos.y;
+    hi.width = this.cellWidth || 100;
+    hi.height = this.cellHeight || 100;
+    hi.visible = true;
+  }
+
+  // -----------------------------------------------------------------------
+  // Keyboard navigation
+  // -----------------------------------------------------------------------
+
+  _handleGridViewKey(event) {
+    const count = _modelCount(this.model);
+    if (count === 0) return;
+    const ci = this.currentIndex < 0 ? 0 : this.currentIndex;
+
+    if (this._isRowFlow()) {
+      const cols = this._columnsPerRow();
+      if (event.key === 'ArrowRight') {
+        const next = Math.min(count - 1, ci + 1);
+        if (next !== this.currentIndex) { this.currentIndex = next; event.accepted = true; }
+      } else if (event.key === 'ArrowLeft') {
+        const next = Math.max(0, ci - 1);
+        if (next !== this.currentIndex) { this.currentIndex = next; event.accepted = true; }
+      } else if (event.key === 'ArrowDown') {
+        const next = Math.min(count - 1, ci + cols);
+        if (next !== this.currentIndex) { this.currentIndex = next; event.accepted = true; }
+      } else if (event.key === 'ArrowUp') {
+        const next = Math.max(0, ci - cols);
+        if (next !== this.currentIndex) { this.currentIndex = next; event.accepted = true; }
+      }
+    } else {
+      // TopToBottom: items fill columns; ArrowDown/Up move within column
+      const rows = this._rowsPerColumn();
+      if (event.key === 'ArrowDown') {
+        const next = Math.min(count - 1, ci + 1);
+        if (next !== this.currentIndex) { this.currentIndex = next; event.accepted = true; }
+      } else if (event.key === 'ArrowUp') {
+        const next = Math.max(0, ci - 1);
+        if (next !== this.currentIndex) { this.currentIndex = next; event.accepted = true; }
+      } else if (event.key === 'ArrowRight') {
+        const next = Math.min(count - 1, ci + rows);
+        if (next !== this.currentIndex) { this.currentIndex = next; event.accepted = true; }
+      } else if (event.key === 'ArrowLeft') {
+        const next = Math.max(0, ci - rows);
+        if (next !== this.currentIndex) { this.currentIndex = next; event.accepted = true; }
+      }
+    }
+  }
+
+  // -----------------------------------------------------------------------
+  // Public API
+  // -----------------------------------------------------------------------
+
+  get createdCount() {
+    return this._delegateItems.filter(Boolean).length;
+  }
+
+  itemAt(index) {
+    return this._delegateItems[index] ?? null;
+  }
+
+  positionViewAtIndex(index, _mode = 0) {
+    const count = _modelCount(this.model);
+    if (index < 0 || index >= count) return;
+    const headerS = this._headerSize();
+    const pos = this._itemPixelPos(index);
+    this.contentY = this._clampY(headerS + pos.y);
+  }
+
+  destroy() {
+    this._disconnectModel();
+    for (const item of this._reusePool) item.destroy();
+    this._reusePool = [];
+    for (const item of this._delegateItems) {
+      if (item) item.destroy();
+    }
+    this._delegateItems = [];
+    if (this._headerItem) { this._headerItem.destroy(); this._headerItem = null; }
+    if (this._footerItem) { this._footerItem.destroy(); this._footerItem = null; }
+    const hi = this.highlightItem;
+    if (hi) { hi.destroy(); this._setPropertyValue('highlightItem', null); }
     super.destroy();
   }
 }
@@ -8453,90 +9203,6 @@ class Overlay extends Item {
 }
 
 // ---------------------------------------------------------------------------
-// PR-B: Qt edge/side constants (used by Drawer and others)
-// ---------------------------------------------------------------------------
-
-const Qt = {
-  LeftEdge:   1,
-  RightEdge:  2,
-  TopEdge:    4,
-  BottomEdge: 8,
-  // Orientation
-  Horizontal: 1,
-  Vertical:   2,
-  // Alignment (mirrors codegen constants)
-  AlignLeft:    'left',
-  AlignRight:   'right',
-  AlignHCenter: 'center',
-  AlignTop:     'top',
-  AlignBottom:  'bottom',
-  AlignVCenter: 'vcenter',
-
-  // ---------------------------------------------------------------------------
-  // PR-C: Qt.createComponent – minimal dynamic component factory
-  // ---------------------------------------------------------------------------
-  /**
-   * Minimal Qt.createComponent(url) implementation.
-   *
-   * In a real Qt app this resolves a .qml file.  Here we only support
-   * components that have been pre-registered via Qt.registerComponent(),
-   * which the compiler can call for each compiled file.  Unknown URLs
-   * return a stub component whose createObject() returns null.
-   */
-  _componentRegistry: {},
-
-  registerComponent(url, factory) {
-    Qt._componentRegistry[url] = factory;
-  },
-
-  createComponent(url) {
-    const factory = Qt._componentRegistry[url];
-    if (factory) {
-      return new Component(factory);
-    }
-    // Return an error stub
-    const stub = new Component(() => null);
-    stub._url   = url;
-    stub._error = `createComponent: component not found: "${url}"`;
-    return stub;
-  },
-
-  /**
-   * Minimal Qt.createQmlObject(qmlString, parent, fileName).
-   *
-   * Full QML parsing in JS is out of scope; this implementation supports
-   * the most common runtime pattern: passing a pre-compiled factory
-   * function as qmlString (since compiled code is JS anyway).
-   *
-   * When a real compiler target is used the compiled factory is stored in
-   * Qt._componentRegistry and this falls back gracefully.
-   */
-  createQmlObject(qmlStringOrFactory, parent, _fileName) {
-    if (typeof qmlStringOrFactory === 'function') {
-      // Treat as a factory directly
-      const comp = new Component(qmlStringOrFactory);
-      return comp.createObject(parent instanceof QObject ? parent : null);
-    }
-    // Unsupported: runtime QML string evaluation is not feasible in a JS sandbox.
-    console.warn('Qt.createQmlObject: runtime QML string evaluation is not supported; ' +
-      'pass a compiled factory function instead.');
-    return null;
-  },
-};
-
-/**
- * Internal helper used by Loader to resolve a source URL to a Component.
- * Returns a Component if found in the registry, otherwise null.
- * @param {string} url
- * @returns {Component|null}
- */
-function _qtCreateComponent(url) {
-  const factory = Qt._componentRegistry[url];
-  if (factory) return new Component(factory);
-  return null;
-}
-
-// ---------------------------------------------------------------------------
 // PR-B: ComboBox – dropdown selection control
 // ---------------------------------------------------------------------------
 
@@ -9344,6 +10010,7 @@ const runtimeExports = {
   Repeater,
   Flickable,
   ListView,
+  GridView,
   // Stage C: focus / keys / pointer handlers
   Keys,
   TapHandler,
