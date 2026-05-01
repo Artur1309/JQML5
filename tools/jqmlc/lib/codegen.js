@@ -545,13 +545,24 @@ const __ENUM_TABLE = {
   'ScrollBar.AlwaysOff': 'ScrollBarAlwaysOff',
   'ScrollBar.AlwaysOn':  'ScrollBarAlwaysOn',
   // Popup closePolicy constants
-  'Popup.NoAutoClose':         0,
-  'Popup.CloseOnEscape':       1,
-  'Popup.CloseOnPressOutside': 2,
+  'Popup.NoAutoClose':           0,
+  'Popup.CloseOnEscape':         1,
+  'Popup.CloseOnPressOutside':   2,
+  'Popup.CloseOnReleaseOutside': 4,
   // Dialog standardButtons constants
   'Dialog.NoButton': 0,
   'Dialog.Ok':       1,
   'Dialog.Cancel':   2,
+  // Qt edge constants (Drawer)
+  'Qt.LeftEdge':   1,
+  'Qt.RightEdge':  2,
+  'Qt.TopEdge':    4,
+  'Qt.BottomEdge': 8,
+  // TextArea wrapMode constants
+  'TextArea.NoWrap':      0,
+  'TextArea.Wrap':        1,
+  'TextArea.WordWrap':    2,
+  'TextArea.WrapAnywhere': 3,
 };
 const __exprCache = new Map();
 function __compileExpression(code) {

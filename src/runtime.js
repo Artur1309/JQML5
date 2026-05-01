@@ -2795,17 +2795,20 @@ class Scene {
       return null;
     }
 
-    // Stage I: collect open popups and handle modal blocking / CloseOnPressOutside
-    if (type === 'down') {
+    // Stage I: collect open popups and handle modal blocking / close policies.
+    // Only the topmost (highest-z) popup is processed per pointer event.
+    if (type === 'down' || type === 'up') {
       const openPopups = this._collectOpenPopups();
       if (openPopups.length > 0) {
-        // Handle topmost popup first (highest z)
         const topPopup = openPopups[openPopups.length - 1];
         const insidePopup = topPopup.containsScenePoint(sceneX, sceneY);
 
         if (!insidePopup) {
-          // CloseOnPressOutside: close the popup
-          if (topPopup.closePolicy & Popup.CloseOnPressOutside) {
+          if (type === 'down' && (topPopup.closePolicy & Popup.CloseOnPressOutside)) {
+            topPopup.close();
+            this.renderer.markDirty();
+          }
+          if (type === 'up' && (topPopup.closePolicy & Popup.CloseOnReleaseOutside)) {
             topPopup.close();
             this.renderer.markDirty();
           }
@@ -2813,6 +2816,17 @@ class Scene {
           if (topPopup.modal) {
             return null;
           }
+        }
+      }
+    }
+
+    // PR-B: close any open ComboBox dropdown on outside click
+    if (type === 'down') {
+      const openCombos = this._collectOpenCombos();
+      for (const combo of openCombos) {
+        if (!combo.containsPoint(sceneX, sceneY)) {
+          combo._closeDropdown();
+          this.renderer.markDirty();
         }
       }
     }
@@ -2895,6 +2909,16 @@ class Scene {
     return result;
   }
 
+  // PR-B: collect all ComboBox instances with an open dropdown
+  _collectOpenCombos(item = this.rootItem, result = []) {
+    if (!(item instanceof Item) || !item.visible) return result;
+    if (item instanceof ComboBox && item._dropdownOpen) result.push(item);
+    for (const child of item.childItems) {
+      this._collectOpenCombos(child, result);
+    }
+    return result;
+  }
+
   // Stage C: Focus management
 
   // Collect all focusable items in depth-first order
@@ -2969,6 +2993,22 @@ class Scene {
           topPopup.close();
           this.renderer.markDirty();
           return { type, key: 'Escape', accepted: true };
+        }
+      }
+    }
+
+    // PR-B: route arrow/enter keys to the topmost open Menu for keyboard navigation
+    if (type === 'pressed') {
+      const openPopups = this._collectOpenPopups();
+      const openMenus = openPopups.filter(p => p instanceof Menu);
+      if (openMenus.length > 0) {
+        const topMenu = openMenus[openMenus.length - 1];
+        if (typeof topMenu.handleKeyEvent === 'function') {
+          const handled = topMenu.handleKeyEvent(originalEvent);
+          if (handled) {
+            this.renderer.markDirty();
+            return { type, key: originalEvent.key, accepted: true };
+          }
         }
       }
     }
@@ -7553,9 +7593,10 @@ class Popup extends Item {
 }
 
 // Static closePolicy constants
-Popup.NoAutoClose         = 0;
-Popup.CloseOnEscape       = 1;
-Popup.CloseOnPressOutside = 2;
+Popup.NoAutoClose           = 0;
+Popup.CloseOnEscape         = 1;
+Popup.CloseOnPressOutside   = 2;
+Popup.CloseOnReleaseOutside = 4;
 
 // ---------------------------------------------------------------------------
 // Stage I: Dialog – modal dialog with title and standard buttons
@@ -7823,6 +7864,8 @@ class Menu extends Popup {
     this.implicitWidth  = options.width  || 160;
     this.implicitHeight = options.height || 8; // grows with items
 
+    // Keyboard-focused item index (-1 = none)
+    this._currentIndex = -1;
     // Watch child changes to re-layout
     this._menuLayoutPending = false;
   }
@@ -7830,6 +7873,10 @@ class Menu extends Popup {
   // Override parentItem setter to re-layout when items are added
   _onChildItemAdded(child) {
     this._relayoutMenu();
+  }
+
+  _menuItems() {
+    return this.childItems.filter(c => c instanceof MenuItem);
   }
 
   _relayoutMenu() {
@@ -7880,6 +7927,16 @@ class Menu extends Popup {
     context.lineWidth   = 1;
     _ctrlRoundRect(context, 0.5, 0.5, w - 1, h - 1, radius);
     context.stroke();
+
+    // Keyboard-focus highlight
+    const items = this._menuItems();
+    if (this._currentIndex >= 0 && this._currentIndex < items.length) {
+      const focusItem = items[this._currentIndex];
+      if (focusItem) {
+        context.fillStyle = Theme.palette.primaryHover || '#e3f2fd';
+        context.fillRect(focusItem.x, focusItem.y, focusItem.width || w, focusItem.height || 32);
+      }
+    }
   }
 
   handlePointerEvent(type, event) {
@@ -7897,10 +7954,51 @@ class Menu extends Popup {
     return false;
   }
 
+  /** Handle keyboard events routed from Scene.dispatchKey. */
+  handleKeyEvent(event) {
+    const items = this._menuItems().filter(it => it.enabled);
+    if (items.length === 0) return false;
+
+    if (event.key === 'ArrowDown') {
+      this._currentIndex = Math.min(
+        this._currentIndex < 0 ? 0 : this._currentIndex + 1,
+        items.length - 1
+      );
+      return true;
+    }
+
+    if (event.key === 'ArrowUp') {
+      this._currentIndex = Math.max(
+        this._currentIndex < 0 ? items.length - 1 : this._currentIndex - 1,
+        0
+      );
+      return true;
+    }
+
+    if (event.key === 'Enter' || event.key === ' ') {
+      if (this._currentIndex >= 0 && this._currentIndex < items.length) {
+        const item = items[this._currentIndex];
+        if (item) {
+          item.triggered.emit();
+          this.close();
+        }
+      }
+      return true;
+    }
+
+    return false;
+  }
+
   // When the menu is opened/closed, update children widths to match menu width.
   open() {
+    this._currentIndex = -1;
     this._relayoutMenu();
     super.open();
+  }
+
+  close() {
+    this._currentIndex = -1;
+    super.close();
   }
 }
 
@@ -7952,6 +8050,799 @@ class Overlay extends Item {
     return y;
   }
 }
+
+// ---------------------------------------------------------------------------
+// PR-B: Qt edge/side constants (used by Drawer and others)
+// ---------------------------------------------------------------------------
+
+const Qt = {
+  LeftEdge:   1,
+  RightEdge:  2,
+  TopEdge:    4,
+  BottomEdge: 8,
+  // Orientation
+  Horizontal: 1,
+  Vertical:   2,
+  // Alignment (mirrors codegen constants)
+  AlignLeft:    'left',
+  AlignRight:   'right',
+  AlignHCenter: 'center',
+  AlignTop:     'top',
+  AlignBottom:  'bottom',
+  AlignVCenter: 'vcenter',
+};
+
+// ---------------------------------------------------------------------------
+// PR-B: ComboBox – dropdown selection control
+// ---------------------------------------------------------------------------
+
+class ComboBox extends Item {
+  constructor(options = {}) {
+    super(options);
+
+    this.defineProperty('model',        options.model        ?? []);
+    this.defineProperty('currentIndex', options.currentIndex !== undefined ? options.currentIndex : 0);
+    this.defineProperty('displayText',  options.displayText  ?? '');
+    this.defineProperty('hovered',      false);
+    this.defineProperty('pressed',      false);
+
+    this.defineSignal('activated');
+    this.defineSignal('currentIndexChanged');
+
+    this._dropdownOpen   = false;
+    this._highlightIndex = -1;
+    this._savedZ         = 0;
+
+    this.activeFocusOnTab = true;
+    this.focusable        = true;
+
+    this.implicitWidth  = options.width  || 120;
+    this.implicitHeight = options.height || 36;
+
+    // Keyboard support
+    this._keys = new Keys();
+    this._keys.onPressed = (event) => {
+      if (!this.enabled) return;
+      const items = this._getModelItems();
+      if (event.key === ' ' || event.key === 'Enter') {
+        if (!this._dropdownOpen) {
+          this._openDropdown();
+        } else {
+          const idx = this._highlightIndex >= 0 ? this._highlightIndex : this.currentIndex;
+          this._selectIndex(idx);
+        }
+        event.accepted = true;
+      } else if (event.key === 'ArrowDown') {
+        if (!this._dropdownOpen) {
+          this._openDropdown();
+        } else {
+          this._highlightIndex = Math.min(
+            this._highlightIndex < 0 ? 0 : this._highlightIndex + 1,
+            items.length - 1
+          );
+        }
+        event.accepted = true;
+      } else if (event.key === 'ArrowUp') {
+        if (this._dropdownOpen) {
+          this._highlightIndex = Math.max(this._highlightIndex - 1, 0);
+        }
+        event.accepted = true;
+      } else if (event.key === 'Escape') {
+        if (this._dropdownOpen) {
+          this._closeDropdown();
+          event.accepted = true;
+        }
+      }
+    };
+  }
+
+  /** The text of the current item. */
+  get currentText() {
+    const items = this._getModelItems();
+    const idx   = this.currentIndex;
+    return (idx >= 0 && idx < items.length) ? String(items[idx]) : '';
+  }
+
+  _getModelItems() {
+    const m = this.model;
+    if (Array.isArray(m)) return m;
+    if (typeof m === 'number') {
+      const arr = [];
+      for (let i = 0; i < m; i++) arr.push(String(i));
+      return arr;
+    }
+    if (m && typeof m.count === 'number') {
+      const arr = [];
+      for (let i = 0; i < m.count; i++) {
+        const row = typeof m.get === 'function' ? m.get(i) : null;
+        arr.push(row && row.text ? row.text : row && row.name ? row.name : String(i));
+      }
+      return arr;
+    }
+    return [];
+  }
+
+  _openDropdown() {
+    if (this._dropdownOpen) return;
+    this._dropdownOpen   = true;
+    this._highlightIndex = this.currentIndex;
+    this._savedZ = this.z;
+    this.z = 500; // render above normal items
+  }
+
+  _closeDropdown() {
+    if (!this._dropdownOpen) return;
+    this._dropdownOpen   = false;
+    this._highlightIndex = -1;
+    this.z = this._savedZ !== undefined ? this._savedZ : 0;
+  }
+
+  _selectIndex(idx) {
+    const items = this._getModelItems();
+    if (idx < 0 || idx >= items.length) {
+      this._closeDropdown();
+      return;
+    }
+    const prev = this.currentIndex;
+    this._setPropertyValue('currentIndex', idx);
+    if (prev !== idx) {
+      this.currentIndexChanged.emit();
+    }
+    this.activated.emit(idx);
+    this._closeDropdown();
+  }
+
+  containsPoint(sceneX, sceneY) {
+    if (!this.visible) return false;
+    const local = this._mapFromScene(sceneX, sceneY);
+    const w = this.width  || this.implicitWidth  || 120;
+    const h = this.height || this.implicitHeight || 36;
+    if (this._dropdownOpen) {
+      const items = this._getModelItems();
+      const dropH = items.length * 32 + 8;
+      return local.x >= 0 && local.x <= w && local.y >= 0 && local.y <= h + dropH;
+    }
+    return local.x >= 0 && local.x <= w && local.y >= 0 && local.y <= h;
+  }
+
+  handlePointerEvent(type, event) {
+    if (!this.enabled) return false;
+
+    const w     = this.width  || this.implicitWidth  || 120;
+    const h     = this.height || this.implicitHeight || 36;
+    const local = this._mapFromScene(event.sceneX, event.sceneY);
+    const inBtn = local.x >= 0 && local.x <= w && local.y >= 0 && local.y <= h;
+
+    if (this._dropdownOpen) {
+      const items  = this._getModelItems();
+      const itemH  = 32;
+      const dropH  = items.length * itemH + 8;
+      const inDrop = local.x >= 0 && local.x <= w && local.y > h && local.y <= h + dropH;
+
+      if (type === 'move') {
+        if (inDrop) {
+          const relY = local.y - h - 4;
+          this._highlightIndex = Math.max(0, Math.min(Math.floor(relY / itemH), items.length - 1));
+        } else {
+          this._highlightIndex = -1;
+        }
+        return inBtn || inDrop;
+      }
+
+      if (type === 'down') {
+        if (inDrop) {
+          const relY = local.y - h - 4;
+          const idx  = Math.max(0, Math.min(Math.floor(relY / itemH), items.length - 1));
+          this._selectIndex(idx);
+          return true;
+        }
+        if (inBtn) {
+          this._closeDropdown();
+          return true;
+        }
+        return false;
+      }
+
+      if (type === 'up') {
+        return inBtn || inDrop;
+      }
+    }
+
+    // Dropdown closed
+    if (type === 'move') {
+      this._setPropertyValue('hovered', inBtn);
+      return this._propertyValues.get('pressed') === true;
+    }
+
+    if (type === 'down' && inBtn) {
+      this._setPropertyValue('pressed', true);
+      this._setPropertyValue('hovered', true);
+      return true;
+    }
+
+    if (type === 'up' && inBtn) {
+      const wasPressed = this._propertyValues.get('pressed');
+      this._setPropertyValue('pressed', false);
+      this._setPropertyValue('hovered', inBtn);
+      if (wasPressed) this._openDropdown();
+      return true;
+    }
+
+    return false;
+  }
+
+  draw(context) {
+    const w = this.width  || this.implicitWidth  || 120;
+    const h = this.height || this.implicitHeight || 36;
+    if (w <= 0 || h <= 0) return;
+
+    const p      = Theme.palette;
+    const f      = Theme.font;
+    const radius = 6;
+
+    // Button background
+    let bg;
+    if (!this.enabled) {
+      bg = p.disabled || '#e0e0e0';
+    } else if (this._dropdownOpen) {
+      bg = p.primaryHover || '#e3f2fd';
+    } else if (this._propertyValues.get('hovered')) {
+      bg = p.surfaceHover || '#f5f5f5';
+    } else {
+      bg = p.surface || '#ffffff';
+    }
+    _ctrlRoundRect(context, 0, 0, w, h, radius);
+    context.fillStyle = bg;
+    context.fill();
+
+    // Border
+    context.strokeStyle = this.activeFocus ? (p.borderFocus || '#1976d2') : (p.border || '#bdbdbd');
+    context.lineWidth   = this.activeFocus ? 2 : 1;
+    _ctrlRoundRect(context, 0.5, 0.5, w - 1, h - 1, radius);
+    context.stroke();
+
+    // Current text
+    const text = this.currentText || this.displayText || '';
+    context.font = `${f.pixelSize || 14}px ${f.family || 'sans-serif'}`;
+    context.fillStyle = this.enabled ? (p.text || '#212121') : (p.disabledText || '#9e9e9e');
+    context.textBaseline = 'middle';
+    context.textAlign    = 'left';
+    context.fillText(String(text), 8, h / 2);
+
+    // Drop arrow
+    const arrowX = w - 20;
+    const arrowY = h / 2;
+    context.fillStyle = p.text || '#212121';
+    context.beginPath();
+    if (this._dropdownOpen) {
+      context.moveTo(arrowX,     arrowY + 3);
+      context.lineTo(arrowX + 8, arrowY + 3);
+      context.lineTo(arrowX + 4, arrowY - 3);
+    } else {
+      context.moveTo(arrowX,     arrowY - 3);
+      context.lineTo(arrowX + 8, arrowY - 3);
+      context.lineTo(arrowX + 4, arrowY + 3);
+    }
+    context.closePath();
+    context.fill();
+
+    context.textAlign    = 'left';
+    context.textBaseline = 'top';
+
+    // Dropdown panel (drawn in local coords directly below the button)
+    if (this._dropdownOpen) {
+      const items = this._getModelItems();
+      const itemH = 32;
+      const dropH = items.length * itemH + 8;
+
+      // Shadow + background
+      context.save();
+      context.shadowColor   = 'rgba(0,0,0,0.2)';
+      context.shadowBlur    = 8;
+      context.shadowOffsetX = 0;
+      context.shadowOffsetY = 2;
+      context.fillStyle = p.surface || '#ffffff';
+      _ctrlRoundRect(context, 0, h, w, dropH, 4);
+      context.fill();
+      context.restore();
+
+      // Border
+      context.strokeStyle = 'rgba(0,0,0,0.12)';
+      context.lineWidth   = 1;
+      _ctrlRoundRect(context, 0.5, h + 0.5, w - 1, dropH - 1, 4);
+      context.stroke();
+
+      // Items
+      context.font         = `${f.pixelSize || 14}px ${f.family || 'sans-serif'}`;
+      context.textBaseline = 'middle';
+      context.textAlign    = 'left';
+
+      for (let i = 0; i < items.length; i++) {
+        const iy = h + 4 + i * itemH;
+
+        if (i === this._highlightIndex) {
+          context.fillStyle = p.primaryHover || '#e3f2fd';
+          context.fillRect(1, iy, w - 2, itemH);
+        }
+        if (i === this.currentIndex) {
+          context.fillStyle = p.primary || '#1976d2';
+          context.font = `bold ${f.pixelSize || 14}px ${f.family || 'sans-serif'}`;
+        } else {
+          context.fillStyle = p.text || '#212121';
+          context.font = `${f.pixelSize || 14}px ${f.family || 'sans-serif'}`;
+        }
+        context.fillText(String(items[i]), 8, iy + itemH / 2);
+      }
+
+      context.textAlign    = 'left';
+      context.textBaseline = 'top';
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// PR-B: ToolTip – brief informational tooltip
+// ---------------------------------------------------------------------------
+
+class ToolTip extends Popup {
+  constructor(options = {}) {
+    super({
+      modal:       false,
+      dim:         false,
+      closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside,
+      background:  '#616161',
+      padding:     0,
+      ...options,
+    });
+
+    this.defineProperty('text',    options.text    ?? '');
+    this.defineProperty('delay',   options.delay   !== undefined ? options.delay   : 700);
+    this.defineProperty('timeout', options.timeout !== undefined ? options.timeout : 5000);
+
+    this.z = 2000; // above regular popups
+
+    this.implicitWidth  = options.width  || 100;
+    this.implicitHeight = options.height || 28;
+
+    this._delayTimer   = null;
+    this._timeoutTimer = null;
+  }
+
+  open() {
+    this._cancelTimers();
+    if (!this.visible) {
+      this._setPropertyValue('visible', true);
+      this.opened.emit();
+      const tout = this.timeout;
+      if (tout > 0) {
+        this._timeoutTimer = setTimeout(() => this.close(), tout);
+      }
+    }
+  }
+
+  close() {
+    this._cancelTimers();
+    if (this.visible) {
+      this._setPropertyValue('visible', false);
+      this.closed.emit();
+    }
+  }
+
+  /** Show after an optional delay (ms). Uses this.delay when omitted. */
+  showDelayed(delay) {
+    this._cancelTimers();
+    const d = delay !== undefined ? delay : this.delay;
+    if (d <= 0) {
+      this.open();
+    } else {
+      this._delayTimer = setTimeout(() => this.open(), d);
+    }
+  }
+
+  _cancelTimers() {
+    if (this._delayTimer)   { clearTimeout(this._delayTimer);   this._delayTimer   = null; }
+    if (this._timeoutTimer) { clearTimeout(this._timeoutTimer); this._timeoutTimer = null; }
+  }
+
+  draw(context) {
+    const w = this.width  || this.implicitWidth  || 100;
+    const h = this.height || this.implicitHeight || 28;
+    if (w <= 0 || h <= 0) return;
+
+    const radius = 4;
+    context.fillStyle = this.background || '#616161';
+    _ctrlRoundRect(context, 0, 0, w, h, radius);
+    context.fill();
+
+    const text = this.text;
+    if (text) {
+      const f = Theme.font;
+      const size = Math.max(11, (f.pixelSize || 14) - 1);
+      context.font         = `${size}px ${f.family || 'sans-serif'}`;
+      context.fillStyle    = '#ffffff';
+      context.textBaseline = 'middle';
+      context.textAlign    = 'center';
+      context.fillText(String(text), w / 2, h / 2);
+      context.textAlign    = 'left';
+      context.textBaseline = 'top';
+    }
+  }
+}
+
+// Static helper to show a shared tooltip at a specific item
+ToolTip._shared = null;
+ToolTip.show = function(text, timeout) {
+  if (!ToolTip._shared) {
+    ToolTip._shared = new ToolTip();
+  }
+  const tt = ToolTip._shared;
+  tt.text = String(text ?? '');
+  if (timeout !== undefined) tt.timeout = timeout;
+  tt.open();
+  return tt;
+};
+ToolTip.hide = function() {
+  if (ToolTip._shared) ToolTip._shared.close();
+};
+
+// ---------------------------------------------------------------------------
+// PR-B: Drawer – panel that slides in from a screen edge
+// ---------------------------------------------------------------------------
+
+class Drawer extends Popup {
+  constructor(options = {}) {
+    super({
+      modal:       options.modal !== undefined ? options.modal : true,
+      dim:         options.dim   !== undefined ? options.dim   : true,
+      closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside,
+      background:  '#ffffff',
+      padding:     0,
+      ...options,
+    });
+
+    // edge: Qt.LeftEdge=1, Qt.RightEdge=2, Qt.TopEdge=4, Qt.BottomEdge=8
+    this.defineProperty('edge',        options.edge        !== undefined ? options.edge        : Qt.LeftEdge);
+    // position: 0.0 (fully closed) to 1.0 (fully open)
+    this.defineProperty('position',    options.position    !== undefined ? options.position    : 0);
+    this.defineProperty('interactive', options.interactive !== undefined ? options.interactive : true);
+
+    this.z = 1100; // above regular popups
+  }
+
+  open() {
+    if (!this.visible) {
+      this._setPropertyValue('position', 1.0);
+      this._setPropertyValue('visible', true);
+      this.opened.emit();
+    }
+  }
+
+  close() {
+    if (this.visible) {
+      this._setPropertyValue('position', 0.0);
+      this._setPropertyValue('visible', false);
+      this.closed.emit();
+    }
+  }
+
+  /** Compute panel bounds in scene coordinates based on edge and position. */
+  _panelRect() {
+    const root = this._sceneRoot();
+    if (!root) return null;
+    const rw  = root.width  || root.implicitWidth  || 0;
+    const rh  = root.height || root.implicitHeight || 0;
+    const pos = this.position || 0;
+    const edge = this.edge;
+    const panelW = this.width  || this.implicitWidth  || 200;
+    const panelH = this.height || this.implicitHeight || rh || 200;
+
+    if (edge === Qt.LeftEdge || edge === 1) {
+      return { x: 0, y: 0, w: panelW * pos, h: rh };
+    } else if (edge === Qt.RightEdge || edge === 2) {
+      return { x: rw - panelW * pos, y: 0, w: panelW * pos, h: rh };
+    } else if (edge === Qt.TopEdge || edge === 4) {
+      return { x: 0, y: 0, w: rw, h: panelH * pos };
+    } else { // BottomEdge
+      return { x: 0, y: rh - panelH * pos, w: rw, h: panelH * pos };
+    }
+  }
+
+  containsScenePoint(sx, sy) {
+    const r = this._panelRect();
+    if (!r || r.w <= 0 || r.h <= 0) return false;
+    return sx >= r.x && sx < r.x + r.w && sy >= r.y && sy < r.y + r.h;
+  }
+
+  draw(context) {
+    if (!this.visible) return;
+    const pos = this.position || 0;
+    if (pos <= 0) return;
+
+    const root = this._sceneRoot();
+    if (!root) return;
+    const rw = root.width  || root.implicitWidth  || 0;
+    const rh = root.height || root.implicitHeight || 0;
+    if (rw <= 0 || rh <= 0) return;
+
+    const sx = this._sceneOffsetX();
+    const sy = this._sceneOffsetY();
+
+    // Dim overlay
+    if (this.modal && this.dim) {
+      context.save();
+      context.translate(-sx, -sy);
+      context.fillStyle = `rgba(0,0,0,${0.4 * pos})`;
+      context.fillRect(0, 0, rw, rh);
+      context.restore();
+    }
+
+    // Panel
+    const r = this._panelRect();
+    if (!r || r.w <= 0 || r.h <= 0) return;
+
+    // Translate from item-local coords to scene coords, then to panel position
+    context.save();
+    context.translate(r.x - sx, r.y - sy);
+
+    // Shadow
+    context.shadowColor   = 'rgba(0,0,0,0.3)';
+    context.shadowBlur    = 16;
+    const edge = this.edge;
+    if (edge === Qt.LeftEdge  || edge === 1) context.shadowOffsetX =  4;
+    else if (edge === Qt.RightEdge || edge === 2) context.shadowOffsetX = -4;
+    else context.shadowOffsetY = (edge === Qt.TopEdge || edge === 4) ? 4 : -4;
+
+    context.fillStyle = this.background || '#ffffff';
+    context.fillRect(0, 0, r.w, r.h);
+    context.shadowColor = 'transparent';
+    context.shadowBlur  = 0;
+    context.restore();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// PR-B: SpinBox – numeric value selector with +/− buttons
+// ---------------------------------------------------------------------------
+
+class SpinBox extends Item {
+  constructor(options = {}) {
+    super(options);
+
+    this.defineProperty('from',     options.from     !== undefined ? options.from     : 0);
+    this.defineProperty('to',       options.to       !== undefined ? options.to       : 100);
+    this.defineProperty('value',    options.value    !== undefined ? options.value    : 0);
+    this.defineProperty('stepSize', options.stepSize !== undefined ? options.stepSize : 1);
+    // Note: defineProperty('value') automatically creates a 'valueChanged' signal.
+
+    this._downHovered = false;
+    this._upHovered   = false;
+    this._downPressed = false;
+    this._upPressed   = false;
+
+    this.activeFocusOnTab = true;
+    this.focusable        = true;
+
+    this.implicitWidth  = options.width  || 120;
+    this.implicitHeight = options.height || 36;
+
+    this._keys = new Keys();
+    this._keys.onPressed = (event) => {
+      if (!this.enabled) return;
+      if (event.key === 'ArrowUp'   || event.key === 'Up')   { this._increment(); event.accepted = true; }
+      if (event.key === 'ArrowDown' || event.key === 'Down') { this._decrement(); event.accepted = true; }
+    };
+  }
+
+  _increment() {
+    const next = Math.min(this.value + this.stepSize, this.to);
+    if (next !== this.value) {
+      this._setPropertyValue('value', next);
+      // valueChanged is automatically emitted by _setPropertyValue
+    }
+  }
+
+  _decrement() {
+    const next = Math.max(this.value - this.stepSize, this.from);
+    if (next !== this.value) {
+      this._setPropertyValue('value', next);
+      // valueChanged is automatically emitted by _setPropertyValue
+    }
+  }
+
+  handlePointerEvent(type, event) {
+    if (!this.enabled) return false;
+
+    const w     = this.width  || this.implicitWidth  || 120;
+    const h     = this.height || this.implicitHeight || 36;
+    const btnW  = h; // square buttons
+    const local = this._mapFromScene(event.sceneX, event.sceneY);
+
+    const inUp    = local.x >= w - btnW && local.x < w     && local.y >= 0 && local.y < h;
+    const inDown  = local.x >= 0        && local.x < btnW  && local.y >= 0 && local.y < h;
+    const inField = !inUp && !inDown && local.x >= 0 && local.x < w && local.y >= 0 && local.y < h;
+
+    if (type === 'move') {
+      this._upHovered   = inUp;
+      this._downHovered = inDown;
+      return this._upPressed || this._downPressed;
+    }
+
+    if (type === 'down') {
+      this._upPressed   = inUp;
+      this._downPressed = inDown;
+      return inUp || inDown || inField;
+    }
+
+    if (type === 'up') {
+      const wasUp   = this._upPressed;
+      const wasDown = this._downPressed;
+      this._upPressed   = false;
+      this._downPressed = false;
+      if (wasUp   && inUp)   this._increment();
+      if (wasDown && inDown) this._decrement();
+      return wasUp || wasDown || inField;
+    }
+
+    return false;
+  }
+
+  draw(context) {
+    const w = this.width  || this.implicitWidth  || 120;
+    const h = this.height || this.implicitHeight || 36;
+    if (w <= 0 || h <= 0) return;
+
+    const p    = Theme.palette;
+    const f    = Theme.font;
+    const btnW = h;
+
+    // Field background
+    _ctrlRoundRect(context, 0, 0, w, h, 6);
+    context.fillStyle = p.surface || '#ffffff';
+    context.fill();
+    context.strokeStyle = this.activeFocus ? (p.borderFocus || '#1976d2') : (p.border || '#bdbdbd');
+    context.lineWidth   = this.activeFocus ? 2 : 1;
+    _ctrlRoundRect(context, 0.5, 0.5, w - 1, h - 1, 6);
+    context.stroke();
+
+    // Value text
+    context.font         = `${f.pixelSize || 14}px ${f.family || 'sans-serif'}`;
+    context.fillStyle    = this.enabled ? (p.text || '#212121') : (p.disabledText || '#9e9e9e');
+    context.textBaseline = 'middle';
+    context.textAlign    = 'center';
+    context.fillText(String(this.value), w / 2, h / 2);
+
+    // Decrement (−) button
+    const downBg = this._downPressed
+      ? (p.primaryPressed || '#1565c0')
+      : this._downHovered ? (p.primaryHover || '#1e88e5') : (p.primary || '#1976d2');
+    _ctrlRoundRect(context, 0, 0, btnW, h, 6);
+    context.fillStyle = downBg;
+    context.fill();
+    context.fillStyle    = '#ffffff';
+    context.textAlign    = 'center';
+    context.textBaseline = 'middle';
+    context.fillText('−', btnW / 2, h / 2);
+
+    // Increment (+) button
+    const upBg = this._upPressed
+      ? (p.primaryPressed || '#1565c0')
+      : this._upHovered ? (p.primaryHover || '#1e88e5') : (p.primary || '#1976d2');
+    _ctrlRoundRect(context, w - btnW, 0, btnW, h, 6);
+    context.fillStyle = upBg;
+    context.fill();
+    context.fillStyle    = '#ffffff';
+    context.fillText('+', w - btnW / 2, h / 2);
+
+    context.textAlign    = 'left';
+    context.textBaseline = 'top';
+  }
+}
+
+// ---------------------------------------------------------------------------
+// PR-B: TextArea – multi-line text editor
+// ---------------------------------------------------------------------------
+
+class TextArea extends Item {
+  constructor(options = {}) {
+    super(options);
+
+    this.defineProperty('text',            options.text            ?? '');
+    this.defineProperty('placeholderText', options.placeholderText ?? '');
+    this.defineProperty('color',           options.color           ?? (Theme.palette.text || '#212121'));
+    this.defineProperty('font',            options.font            ?? { ...Theme.font });
+    this.defineProperty('readOnly',        options.readOnly        !== undefined ? options.readOnly : false);
+    this.defineProperty('wrapMode',        options.wrapMode        !== undefined ? options.wrapMode : TextArea.Wrap);
+
+    this.activeFocusOnTab = true;
+    this.focusable        = true;
+
+    this.implicitWidth  = options.width  || 200;
+    this.implicitHeight = options.height || 80;
+
+    // Very basic typing support when not readOnly
+    this._keys = new Keys();
+    this._keys.onPressed = (event) => {
+      if (this.readOnly || !this.enabled) return;
+      if (event.key === 'Backspace') {
+        if (this.text.length > 0) {
+          this.text = this.text.slice(0, -1);
+          event.accepted = true;
+        }
+      } else if (event.text && event.text.length === 1) {
+        this.text = this.text + event.text;
+        event.accepted = true;
+      } else if (event.key === 'Enter') {
+        this.text = this.text + '\n';
+        event.accepted = true;
+      }
+    };
+  }
+
+  handlePointerEvent(type, event) {
+    if (type === 'down' && this.containsPoint(event.sceneX, event.sceneY)) {
+      return true;
+    }
+    return false;
+  }
+
+  draw(context) {
+    const w = this.width  || this.implicitWidth  || 200;
+    const h = this.height || this.implicitHeight || 80;
+    if (w <= 0 || h <= 0) return;
+
+    const p    = Theme.palette;
+    const font = this.font || Theme.font;
+    const size = font.pixelSize || 14;
+
+    // Background
+    _ctrlRoundRect(context, 0, 0, w, h, 4);
+    context.fillStyle = p.surface || '#ffffff';
+    context.fill();
+
+    // Border
+    context.strokeStyle = this.activeFocus ? (p.borderFocus || '#1976d2') : (p.border || '#bdbdbd');
+    context.lineWidth   = this.activeFocus ? 2 : 1;
+    _ctrlRoundRect(context, 0.5, 0.5, w - 1, h - 1, 4);
+    context.stroke();
+
+    const text        = this.text || '';
+    const placeholder = this.placeholderText || '';
+    const padding     = 8;
+    const lineH       = size * 1.4;
+    const bold        = font.bold ? 'bold ' : '';
+    context.font         = `${bold}${size}px ${font.family || 'sans-serif'}`;
+    context.textBaseline = 'top';
+
+    if (text) {
+      context.fillStyle = this.color || p.text || '#212121';
+      const lines = text.split('\n');
+      let y = padding;
+      for (const line of lines) {
+        if (y + lineH > h - padding) break;
+        context.fillText(line, padding, y);
+        y += lineH;
+      }
+    } else if (placeholder) {
+      context.fillStyle = p.placeholder || '#9e9e9e';
+      context.fillText(placeholder, padding, padding);
+    }
+
+    // Blinking cursor (static – always shown when focused)
+    if (this.activeFocus && !this.readOnly) {
+      const lines     = text.split('\n');
+      const lastLine  = lines[lines.length - 1] || '';
+      const lastLineY = padding + (lines.length - 1) * lineH;
+      const cursorX   = padding + Math.min(context.measureText(lastLine).width, w - padding * 2 - 2);
+      context.fillStyle = p.primary || '#1976d2';
+      context.fillRect(cursorX, lastLineY, 2, size);
+    }
+  }
+}
+
+TextArea.NoWrap     = 0;
+TextArea.Wrap       = 1;
+TextArea.WordWrap   = 2;
+TextArea.WrapAnywhere = 3;
 
 const runtimeExports = {
   Signal,
@@ -8028,6 +8919,13 @@ const runtimeExports = {
   MenuItem,
   Menu,
   Overlay,
+  // PR-B: new controls
+  Qt,
+  ComboBox,
+  ToolTip,
+  Drawer,
+  SpinBox,
+  TextArea,
 };
 
 if (typeof module !== 'undefined' && module.exports) {

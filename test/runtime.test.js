@@ -5231,3 +5231,541 @@ test('ListView _indexAtOffset binary-search returns correct index', () => {
 
   lv.destroy();
 });
+
+// =============================================================================
+// PR-B: QtQuick.Controls parity – new controls and popup improvements
+// =============================================================================
+
+// ---------------------------------------------------------------------------
+// Popup: CloseOnReleaseOutside
+// ---------------------------------------------------------------------------
+
+test('Popup CloseOnReleaseOutside constant equals 4', () => {
+  const { Popup } = require('../src/runtime');
+  assert.equal(Popup.CloseOnReleaseOutside, 4);
+});
+
+test('Scene.dispatchPointer CloseOnReleaseOutside closes popup on pointer up outside', () => {
+  const { Item, Popup, Scene } = require('../src/runtime');
+
+  const root = new Item();
+  root.width = 400; root.height = 400;
+
+  const popup = new Popup({ parentItem: root, closePolicy: Popup.CloseOnReleaseOutside });
+  popup.x = 100; popup.y = 100;
+  popup.width = 200; popup.height = 200;
+  popup.open();
+
+  const scene = new Scene({ rootItem: root });
+
+  // pointer-down outside should NOT close (policy is release-outside, not press-outside)
+  scene.dispatchPointer('down', 10, 10);
+  assert.equal(popup.visible, true, 'popup should stay open after press-outside with CloseOnReleaseOutside');
+
+  // pointer-up outside SHOULD close
+  scene.dispatchPointer('up', 10, 10);
+  assert.equal(popup.visible, false, 'popup should close on release-outside with CloseOnReleaseOutside');
+});
+
+test('Scene handles multiple stacked popups: topmost closes first on outside click', () => {
+  const { Item, Popup, Scene } = require('../src/runtime');
+
+  const root = new Item();
+  root.width = 400; root.height = 400;
+
+  const popup1 = new Popup({ parentItem: root, closePolicy: Popup.CloseOnPressOutside });
+  popup1.x = 50; popup1.y = 50; popup1.width = 100; popup1.height = 100; popup1.z = 1000;
+  popup1.open();
+
+  const popup2 = new Popup({ parentItem: root, closePolicy: Popup.CloseOnPressOutside });
+  popup2.x = 200; popup2.y = 200; popup2.width = 100; popup2.height = 100; popup2.z = 1001;
+  popup2.open();
+
+  const scene = new Scene({ rootItem: root });
+
+  // Click outside both – topmost (popup2) should close first
+  scene.dispatchPointer('down', 10, 10);
+  assert.equal(popup2.visible, false, 'topmost popup should close on outside click');
+  assert.equal(popup1.visible, true,  'lower popup should remain open');
+});
+
+// ---------------------------------------------------------------------------
+// Menu: keyboard navigation
+// ---------------------------------------------------------------------------
+
+test('Menu.handleKeyEvent ArrowDown moves to first item', () => {
+  const { Menu, MenuItem } = require('../src/runtime');
+
+  const menu = new Menu();
+  menu.width = 160;
+  const item1 = new MenuItem({ parentItem: menu, text: 'Cut'  });
+  const item2 = new MenuItem({ parentItem: menu, text: 'Copy' });
+  menu.open();
+
+  assert.equal(menu._currentIndex, -1, 'starts with no selection');
+  menu.handleKeyEvent({ key: 'ArrowDown' });
+  assert.equal(menu._currentIndex, 0, 'ArrowDown should select first item');
+  menu.handleKeyEvent({ key: 'ArrowDown' });
+  assert.equal(menu._currentIndex, 1, 'ArrowDown again should select second item');
+});
+
+test('Menu.handleKeyEvent ArrowUp navigates backward', () => {
+  const { Menu, MenuItem } = require('../src/runtime');
+
+  const menu = new Menu();
+  menu.width = 160;
+  new MenuItem({ parentItem: menu, text: 'Cut'   });
+  new MenuItem({ parentItem: menu, text: 'Copy'  });
+  new MenuItem({ parentItem: menu, text: 'Paste' });
+  menu.open();
+
+  menu.handleKeyEvent({ key: 'ArrowDown' });
+  menu.handleKeyEvent({ key: 'ArrowDown' });
+  assert.equal(menu._currentIndex, 1);
+  menu.handleKeyEvent({ key: 'ArrowUp' });
+  assert.equal(menu._currentIndex, 0, 'ArrowUp should move back');
+});
+
+test('Menu.handleKeyEvent Enter triggers focused item and closes menu', () => {
+  const { Menu, MenuItem } = require('../src/runtime');
+
+  const menu = new Menu();
+  menu.width = 160;
+  const item = new MenuItem({ parentItem: menu, text: 'Cut' });
+  menu.open();
+
+  let triggered = false;
+  item.triggered.connect(() => { triggered = true; });
+
+  menu.handleKeyEvent({ key: 'ArrowDown' }); // select item 0
+  menu.handleKeyEvent({ key: 'Enter' });
+
+  assert.equal(triggered, true,          'Enter should trigger focused item');
+  assert.equal(menu.visible, false,      'menu should close after Enter');
+});
+
+test('Scene.dispatchKey routes arrow keys to open Menu', () => {
+  const { Item, Menu, MenuItem, Scene } = require('../src/runtime');
+
+  const root = new Item();
+  root.width = 400; root.height = 400;
+
+  const menu = new Menu({ parentItem: root });
+  menu.x = 10; menu.y = 10; menu.width = 160;
+  const mi1 = new MenuItem({ parentItem: menu, text: 'Alpha' });
+  const mi2 = new MenuItem({ parentItem: menu, text: 'Beta'  });
+  menu.open();
+
+  const scene = new Scene({ rootItem: root });
+  const btn = new Item({ parentItem: root });
+  btn.activeFocusOnTab = true; btn.focusable = true;
+  scene.forceActiveFocus(btn);
+
+  scene.dispatchKey('pressed', { key: 'ArrowDown', code: 'ArrowDown', ctrlKey: false, altKey: false, shiftKey: false, metaKey: false });
+  assert.equal(menu._currentIndex, 0, 'ArrowDown via Scene should focus first menu item');
+});
+
+test('Menu.open() resets _currentIndex to -1', () => {
+  const { Menu, MenuItem } = require('../src/runtime');
+  const menu = new Menu();
+  new MenuItem({ parentItem: menu, text: 'A' });
+  menu.open();
+  menu.handleKeyEvent({ key: 'ArrowDown' });
+  assert.equal(menu._currentIndex, 0);
+  menu.close();
+  assert.equal(menu._currentIndex, -1, 'close() should reset _currentIndex');
+  menu.open();
+  assert.equal(menu._currentIndex, -1, 'open() should reset _currentIndex');
+});
+
+// ---------------------------------------------------------------------------
+// ComboBox
+// ---------------------------------------------------------------------------
+
+test('ComboBox defaults: currentIndex=0, model=[]', () => {
+  const { ComboBox } = require('../src/runtime');
+  const cb = new ComboBox();
+  assert.equal(cb.currentIndex, 0);
+  assert.deepEqual(cb.model, []);
+});
+
+test('ComboBox.currentText reflects model[currentIndex]', () => {
+  const { ComboBox } = require('../src/runtime');
+  const cb = new ComboBox({ model: ['Red', 'Green', 'Blue'], currentIndex: 1 });
+  assert.equal(cb.currentText, 'Green');
+});
+
+test('ComboBox._getModelItems handles array model', () => {
+  const { ComboBox } = require('../src/runtime');
+  const cb = new ComboBox({ model: ['A', 'B', 'C'] });
+  assert.deepEqual(cb._getModelItems(), ['A', 'B', 'C']);
+});
+
+test('ComboBox._getModelItems handles numeric model', () => {
+  const { ComboBox } = require('../src/runtime');
+  const cb = new ComboBox({ model: 3 });
+  assert.deepEqual(cb._getModelItems(), ['0', '1', '2']);
+});
+
+test('ComboBox emits activated and currentIndexChanged on _selectIndex', () => {
+  const { ComboBox } = require('../src/runtime');
+  const cb = new ComboBox({ model: ['X', 'Y', 'Z'], currentIndex: 0 });
+
+  const events = [];
+  cb.activated.connect((idx) => events.push({ e: 'activated', idx }));
+  cb.currentIndexChanged.connect(() => events.push({ e: 'changed', idx: cb.currentIndex }));
+
+  cb._openDropdown();
+  cb._selectIndex(2);
+
+  assert.ok(events.some(e => e.e === 'activated' && e.idx === 2), 'activated(2) should fire');
+  assert.ok(events.some(e => e.e === 'changed'), 'currentIndexChanged should fire');
+  assert.equal(cb.currentIndex, 2);
+  assert.equal(cb._dropdownOpen, false, 'dropdown should close after selection');
+});
+
+test('ComboBox._openDropdown / _closeDropdown toggles state and z', () => {
+  const { ComboBox } = require('../src/runtime');
+  const cb = new ComboBox({ model: ['A', 'B'] });
+  const origZ = cb.z;
+
+  cb._openDropdown();
+  assert.equal(cb._dropdownOpen, true);
+  assert.ok(cb.z > origZ, 'z should be elevated while dropdown is open');
+
+  cb._closeDropdown();
+  assert.equal(cb._dropdownOpen, false);
+  assert.equal(cb.z, origZ, 'z should return to original after close');
+});
+
+test('ComboBox.containsPoint includes dropdown area when open', () => {
+  const { Item, ComboBox } = require('../src/runtime');
+  const root = new Item();
+  root.width = 400; root.height = 400;
+
+  const cb = new ComboBox({ parentItem: root, model: ['A', 'B', 'C'] });
+  cb.x = 50; cb.y = 50; cb.width = 120; cb.height = 36;
+
+  // Closed – point below button should not hit
+  assert.equal(cb.containsPoint(110, 100), false, 'below button should not hit when closed');
+
+  cb._openDropdown();
+  // Open – point in dropdown area should hit
+  assert.equal(cb.containsPoint(110, 100), true, 'dropdown area should be hit-testable when open');
+});
+
+test('ComboBox pointer: down then up opens dropdown', () => {
+  const { Item, ComboBox, Scene } = require('../src/runtime');
+  const root = new Item();
+  root.width = 400; root.height = 400;
+
+  const cb = new ComboBox({ parentItem: root, model: ['One', 'Two'] });
+  cb.x = 10; cb.y = 10; cb.width = 120; cb.height = 36;
+
+  const scene = new Scene({ rootItem: root });
+  scene.dispatchPointer('down', 70, 28);
+  scene.dispatchPointer('up',   70, 28);
+
+  assert.equal(cb._dropdownOpen, true, 'dropdown should open after press+release on button');
+});
+
+test('ComboBox Scene: outside click closes dropdown', () => {
+  const { Item, ComboBox, Scene } = require('../src/runtime');
+  const root = new Item();
+  root.width = 400; root.height = 400;
+
+  const cb = new ComboBox({ parentItem: root, model: ['One', 'Two', 'Three'] });
+  cb.x = 10; cb.y = 10; cb.width = 120; cb.height = 36;
+
+  const scene = new Scene({ rootItem: root });
+
+  // Open the dropdown
+  cb._openDropdown();
+  assert.equal(cb._dropdownOpen, true);
+
+  // Click outside
+  scene.dispatchPointer('down', 300, 300);
+  assert.equal(cb._dropdownOpen, false, 'dropdown should close on outside click');
+});
+
+test('ComboBox keyboard: ArrowDown opens dropdown', () => {
+  const { Item, ComboBox, Scene } = require('../src/runtime');
+  const root = new Item();
+  root.width = 400; root.height = 400;
+
+  const cb = new ComboBox({ parentItem: root, model: ['A', 'B', 'C'] });
+  cb.x = 10; cb.y = 10; cb.width = 120; cb.height = 36;
+
+  const scene = new Scene({ rootItem: root });
+  scene.forceActiveFocus(cb);
+
+  scene.dispatchKey('pressed', { key: 'ArrowDown', code: 'ArrowDown', ctrlKey: false, altKey: false, shiftKey: false, metaKey: false });
+  assert.equal(cb._dropdownOpen, true, 'ArrowDown should open ComboBox dropdown');
+});
+
+// ---------------------------------------------------------------------------
+// ToolTip
+// ---------------------------------------------------------------------------
+
+test('ToolTip defaults to hidden with text property', () => {
+  const { ToolTip } = require('../src/runtime');
+  const tt = new ToolTip({ text: 'Hello' });
+  assert.equal(tt.visible, false);
+  assert.equal(tt.text, 'Hello');
+});
+
+test('ToolTip.open() makes tooltip visible', () => {
+  const { ToolTip } = require('../src/runtime');
+  const tt = new ToolTip({ text: 'Tip', timeout: 0 });
+  tt.open();
+  assert.equal(tt.visible, true);
+  tt.close();
+});
+
+test('ToolTip.close() hides tooltip and cancels timers', () => {
+  const { ToolTip } = require('../src/runtime');
+  const tt = new ToolTip({ text: 'Tip', timeout: 0 });
+  tt.open();
+  tt.close();
+  assert.equal(tt.visible, false);
+});
+
+test('ToolTip has high z (above regular popups)', () => {
+  const { ToolTip } = require('../src/runtime');
+  const { Popup } = require('../src/runtime');
+  const tt = new ToolTip();
+  const p  = new Popup();
+  assert.ok(tt.z > p.z, 'ToolTip z should be higher than regular Popup z');
+});
+
+test('ToolTip.show() static creates/shows shared instance', () => {
+  const { ToolTip } = require('../src/runtime');
+  ToolTip._shared = null; // reset
+  const tt = ToolTip.show('Quick tip', 0);
+  assert.ok(tt instanceof ToolTip);
+  assert.equal(tt.visible, true);
+  assert.equal(tt.text, 'Quick tip');
+  ToolTip.hide();
+  assert.equal(tt.visible, false);
+});
+
+test('ToolTip is a Popup subclass (CloseOnEscape works)', () => {
+  const { Item, ToolTip, Scene } = require('../src/runtime');
+  const root = new Item();
+  root.width = 400; root.height = 400;
+
+  const tt = new ToolTip({ parentItem: root, text: 'Press Escape', timeout: 0 });
+  tt.open();
+
+  const scene = new Scene({ rootItem: root });
+  const focusItem = new Item({ parentItem: root });
+  focusItem.activeFocusOnTab = true; focusItem.focusable = true;
+  scene.forceActiveFocus(focusItem);
+
+  scene.dispatchKey('pressed', { key: 'Escape', code: 'Escape', ctrlKey: false, altKey: false, shiftKey: false, metaKey: false });
+  assert.equal(tt.visible, false, 'Escape should close ToolTip');
+});
+
+// ---------------------------------------------------------------------------
+// Drawer
+// ---------------------------------------------------------------------------
+
+test('Drawer defaults to hidden with edge=Qt.LeftEdge', () => {
+  const { Drawer, Qt } = require('../src/runtime');
+  const d = new Drawer({ width: 200 });
+  assert.equal(d.visible,  false);
+  assert.equal(d.edge,     Qt.LeftEdge);
+  assert.equal(d.position, 0);
+});
+
+test('Drawer.open() makes visible and sets position=1.0', () => {
+  const { Drawer } = require('../src/runtime');
+  const d = new Drawer({ width: 200 });
+  d.open();
+  assert.equal(d.visible,  true);
+  assert.equal(d.position, 1.0);
+});
+
+test('Drawer.close() hides and resets position=0', () => {
+  const { Drawer } = require('../src/runtime');
+  const d = new Drawer({ width: 200 });
+  d.open();
+  d.close();
+  assert.equal(d.visible,  false);
+  assert.equal(d.position, 0);
+});
+
+test('Drawer emits opened/closed signals', () => {
+  const { Drawer } = require('../src/runtime');
+  const d = new Drawer({ width: 200 });
+  const log = [];
+  d.opened.connect(() => log.push('opened'));
+  d.closed.connect(() => log.push('closed'));
+  d.open();
+  d.close();
+  assert.deepEqual(log, ['opened', 'closed']);
+});
+
+test('Drawer is modal by default', () => {
+  const { Drawer } = require('../src/runtime');
+  const d = new Drawer({ width: 200 });
+  assert.equal(d.modal, true);
+});
+
+test('Drawer.containsScenePoint respects position and edge', () => {
+  const { Item, Drawer, Qt } = require('../src/runtime');
+  const root = new Item();
+  root.width = 400; root.height = 300;
+
+  const d = new Drawer({ parentItem: root, edge: Qt.LeftEdge, width: 200 });
+  d.open(); // position = 1.0
+
+  // Left edge drawer with position=1 should cover (0,0) to (200, 300)
+  assert.equal(d.containsScenePoint(100, 150), true,  'inside left drawer panel');
+  assert.equal(d.containsScenePoint(250, 150), false, 'outside left drawer panel');
+});
+
+test('Qt edge constants are correct', () => {
+  const { Qt } = require('../src/runtime');
+  assert.equal(Qt.LeftEdge,   1);
+  assert.equal(Qt.RightEdge,  2);
+  assert.equal(Qt.TopEdge,    4);
+  assert.equal(Qt.BottomEdge, 8);
+});
+
+// ---------------------------------------------------------------------------
+// SpinBox
+// ---------------------------------------------------------------------------
+
+test('SpinBox defaults: value=0, from=0, to=100, stepSize=1', () => {
+  const { SpinBox } = require('../src/runtime');
+  const sb = new SpinBox();
+  assert.equal(sb.value,    0);
+  assert.equal(sb.from,     0);
+  assert.equal(sb.to,       100);
+  assert.equal(sb.stepSize, 1);
+});
+
+test('SpinBox._increment increases value by stepSize', () => {
+  const { SpinBox } = require('../src/runtime');
+  const sb = new SpinBox({ value: 5, stepSize: 2 });
+  sb._increment();
+  assert.equal(sb.value, 7);
+});
+
+test('SpinBox._decrement decreases value by stepSize', () => {
+  const { SpinBox } = require('../src/runtime');
+  const sb = new SpinBox({ value: 5, stepSize: 2 });
+  sb._decrement();
+  assert.equal(sb.value, 3);
+});
+
+test('SpinBox._increment clamps to to', () => {
+  const { SpinBox } = require('../src/runtime');
+  const sb = new SpinBox({ value: 99, to: 100 });
+  sb._increment();
+  assert.equal(sb.value, 100);
+  sb._increment(); // no-op at max
+  assert.equal(sb.value, 100);
+});
+
+test('SpinBox._decrement clamps to from', () => {
+  const { SpinBox } = require('../src/runtime');
+  const sb = new SpinBox({ value: 1, from: 0 });
+  sb._decrement();
+  assert.equal(sb.value, 0);
+  sb._decrement(); // no-op at min
+  assert.equal(sb.value, 0);
+});
+
+test('SpinBox emits valueChanged signal', () => {
+  const { SpinBox } = require('../src/runtime');
+  const sb = new SpinBox({ value: 10 });
+  let count = 0;
+  sb.valueChanged.connect(() => count++);
+  sb._increment();
+  sb._decrement();
+  assert.equal(count, 2);
+});
+
+test('SpinBox keyboard ArrowUp/Down change value', () => {
+  const { Item, SpinBox, Scene } = require('../src/runtime');
+  const root = new Item();
+  root.width = 300; root.height = 100;
+
+  const sb = new SpinBox({ parentItem: root, value: 50, stepSize: 5 });
+  sb.x = 10; sb.y = 10; sb.width = 120; sb.height = 36;
+
+  const scene = new Scene({ rootItem: root });
+  scene.forceActiveFocus(sb);
+
+  scene.dispatchKey('pressed', { key: 'ArrowUp', code: 'ArrowUp', ctrlKey: false, altKey: false, shiftKey: false, metaKey: false });
+  assert.equal(sb.value, 55, 'ArrowUp should increment');
+
+  scene.dispatchKey('pressed', { key: 'ArrowDown', code: 'ArrowDown', ctrlKey: false, altKey: false, shiftKey: false, metaKey: false });
+  assert.equal(sb.value, 50, 'ArrowDown should decrement');
+});
+
+// ---------------------------------------------------------------------------
+// TextArea
+// ---------------------------------------------------------------------------
+
+test('TextArea defaults', () => {
+  const { TextArea } = require('../src/runtime');
+  const ta = new TextArea();
+  assert.equal(ta.text,            '');
+  assert.equal(ta.placeholderText, '');
+  assert.equal(ta.readOnly,        false);
+  assert.equal(ta.wrapMode,        TextArea.Wrap);
+});
+
+test('TextArea wrapMode constants', () => {
+  const { TextArea } = require('../src/runtime');
+  assert.equal(TextArea.NoWrap,     0);
+  assert.equal(TextArea.Wrap,       1);
+  assert.equal(TextArea.WordWrap,   2);
+  assert.equal(TextArea.WrapAnywhere, 3);
+});
+
+test('TextArea typing via keyboard when focused', () => {
+  const { Item, TextArea, Scene } = require('../src/runtime');
+  const root = new Item();
+  root.width = 300; root.height = 200;
+
+  const ta = new TextArea({ parentItem: root, text: '' });
+  ta.x = 10; ta.y = 10; ta.width = 200; ta.height = 80;
+
+  const scene = new Scene({ rootItem: root });
+  scene.forceActiveFocus(ta);
+
+  scene.dispatchKey('pressed', { key: 'a', code: 'KeyA', text: 'a', ctrlKey: false, altKey: false, shiftKey: false, metaKey: false });
+  assert.equal(ta.text, 'a', 'typing "a" should append to text');
+
+  scene.dispatchKey('pressed', { key: 'b', code: 'KeyB', text: 'b', ctrlKey: false, altKey: false, shiftKey: false, metaKey: false });
+  assert.equal(ta.text, 'ab');
+
+  scene.dispatchKey('pressed', { key: 'Backspace', code: 'Backspace', text: '', ctrlKey: false, altKey: false, shiftKey: false, metaKey: false });
+  assert.equal(ta.text, 'a', 'Backspace should remove last character');
+});
+
+test('TextArea readOnly prevents editing', () => {
+  const { Item, TextArea, Scene } = require('../src/runtime');
+  const root = new Item();
+  root.width = 300; root.height = 200;
+
+  const ta = new TextArea({ parentItem: root, text: 'fixed', readOnly: true });
+  ta.x = 10; ta.y = 10; ta.width = 200; ta.height = 80;
+
+  const scene = new Scene({ rootItem: root });
+  scene.forceActiveFocus(ta);
+
+  scene.dispatchKey('pressed', { key: 'x', code: 'KeyX', text: 'x', ctrlKey: false, altKey: false, shiftKey: false, metaKey: false });
+  assert.equal(ta.text, 'fixed', 'readOnly TextArea should not change text');
+});
+
+test('TextArea is focusable', () => {
+  const { TextArea } = require('../src/runtime');
+  const ta = new TextArea();
+  assert.equal(ta.activeFocusOnTab, true);
+  assert.equal(ta.focusable,        true);
+});

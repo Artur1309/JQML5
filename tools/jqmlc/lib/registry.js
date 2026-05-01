@@ -105,6 +105,12 @@ const RUNTIME_TYPES = [
   ['MenuItem', { kind: 'runtime', runtimeExport: 'MenuItem', category: 'controls', isItem: true }],
   ['Menu', { kind: 'runtime', runtimeExport: 'Menu', category: 'controls', isItem: true }],
   ['Overlay', { kind: 'runtime', runtimeExport: 'Overlay', category: 'controls', isItem: true }],
+  // PR-B: new controls
+  ['ComboBox', { kind: 'runtime', runtimeExport: 'ComboBox', category: 'controls', isItem: true }],
+  ['ToolTip', { kind: 'runtime', runtimeExport: 'ToolTip', category: 'controls', isItem: true }],
+  ['Drawer', { kind: 'runtime', runtimeExport: 'Drawer', category: 'controls', isItem: true }],
+  ['SpinBox', { kind: 'runtime', runtimeExport: 'SpinBox', category: 'controls', isItem: true }],
+  ['TextArea', { kind: 'runtime', runtimeExport: 'TextArea', category: 'controls', isItem: true }],
   // Stage E: rendering improvements
   ['Image', { kind: 'runtime', runtimeExport: 'Image', category: 'quick', isItem: true }],
   // Stage D: grouped property block pseudo-types (lowercase; expanded inline in codegen)
@@ -139,6 +145,7 @@ function createDefaultRegistries() {
       'Button', 'Label', 'TextField', 'Slider', 'CheckBox',
       'ScrollBar', 'ScrollView', 'ApplicationWindow', 'Page', 'StackView',
       'Popup', 'Dialog', 'MenuItem', 'Menu', 'Overlay',
+      'ComboBox', 'ToolTip', 'Drawer', 'SpinBox', 'TextArea',
     ],
   });
   // QtQuick.Layouts – exposes RowLayout, ColumnLayout, GridLayout.
