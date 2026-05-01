@@ -111,7 +111,10 @@ const RUNTIME_TYPES = [
   ['Drawer', { kind: 'runtime', runtimeExport: 'Drawer', category: 'controls', isItem: true }],
   ['SpinBox', { kind: 'runtime', runtimeExport: 'SpinBox', category: 'controls', isItem: true }],
   ['TextArea', { kind: 'runtime', runtimeExport: 'TextArea', category: 'controls', isItem: true }],
-  // Stage E: rendering improvements
+  // Step C: core QML utilities
+  ['Timer', { kind: 'runtime', runtimeExport: 'Timer', category: 'qml-utils' }],
+  ['Connections', { kind: 'runtime', runtimeExport: 'Connections', category: 'qml-utils' }],
+  ['BindingElement', { kind: 'runtime', runtimeExport: 'BindingElement', category: 'qml-utils' }],
   ['Image', { kind: 'runtime', runtimeExport: 'Image', category: 'quick', isItem: true }],
   // Stage D: grouped property block pseudo-types (lowercase; expanded inline in codegen)
   ['border', { kind: 'grouped-block', runtimeExport: null, category: 'quick-grouped' }],
@@ -135,10 +138,15 @@ function createDefaultRegistries() {
       'Row', 'Column', 'Flow',
       'TapHandler', 'DragHandler',
       'HoverHandler', 'WheelHandler', 'PinchHandler',
+      // Step C: core QML utilities available in QtQuick
+      'Timer', 'Connections',
     ],
   });
   modules.registerModule('QtQml', {
-    listTypes: () => ['QtObject', 'Component', 'Binding', 'Context', 'ComponentScope'],
+    listTypes: () => ['QtObject', 'Component', 'Binding', 'Context', 'ComponentScope',
+      // Step C: BindingElement exposed as QtQml type
+      'BindingElement',
+    ],
   });
   modules.registerModule('QtQuick.Controls', {
     listTypes: () => [

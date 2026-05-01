@@ -5769,3 +5769,334 @@ test('TextArea is focusable', () => {
   assert.equal(ta.activeFocusOnTab, true);
   assert.equal(ta.focusable,        true);
 });
+
+// ---------------------------------------------------------------------------
+// Step C: Loader enhancements
+// ---------------------------------------------------------------------------
+
+test('Loader has status constants', () => {
+  const { Loader } = require('../src/runtime');
+  assert.equal(Loader.Null,    0);
+  assert.equal(Loader.Ready,   1);
+  assert.equal(Loader.Loading, 2);
+  assert.equal(Loader.Error,   3);
+});
+
+test('Loader starts with Null status and zero progress', () => {
+  const { Loader } = require('../src/runtime');
+  const loader = new Loader();
+  assert.equal(loader.status,   Loader.Null);
+  assert.equal(loader.progress, 0);
+  assert.equal(loader.item,     null);
+});
+
+test('Loader sets Ready status and progress=1 after loading a sourceComponent', () => {
+  const { Item, Component, Loader } = require('../src/runtime');
+  const comp = new Component(({ parent }) => {
+    return new Item({ parentItem: parent });
+  });
+  const host = new Item();
+  const loader = new Loader({ parentItem: host, sourceComponent: comp });
+  assert.equal(loader.status,   Loader.Ready);
+  assert.equal(loader.progress, 1);
+  assert.ok(loader.item instanceof Item);
+});
+
+test('Loader sets Null status when active=false', () => {
+  const { Item, Component, Loader } = require('../src/runtime');
+  const comp = new Component(({ parent }) => new Item({ parentItem: parent }));
+  const host = new Item();
+  const loader = new Loader({ parentItem: host, sourceComponent: comp });
+  assert.equal(loader.status, Loader.Ready);
+  loader.active = false;
+  assert.equal(loader.status,   Loader.Null);
+  assert.equal(loader.progress, 0);
+  assert.equal(loader.item,     null);
+});
+
+test('Loader emits loaded signal when item is created', () => {
+  const { Item, Component, Loader } = require('../src/runtime');
+  const comp = new Component(({ parent }) => new Item({ parentItem: parent }));
+  const host = new Item();
+  const loader = new Loader({ parentItem: host, active: false });
+
+  let fired = false;
+  loader.loaded.connect(() => { fired = true; });
+
+  loader.sourceComponent = comp;
+  loader.active = true;
+  assert.equal(fired, true);
+});
+
+test('Loader item is parented to the Loader itself', () => {
+  const { Item, Component, Loader } = require('../src/runtime');
+  const comp = new Component(({ parent }) => new Item({ parentItem: parent }));
+  const host = new Item();
+  const loader = new Loader({ parentItem: host, sourceComponent: comp });
+  assert.equal(loader.item.parentItem, loader, 'loaded item should be a child of Loader');
+});
+
+test('Loader source property exists and defaults to empty string', () => {
+  const { Loader } = require('../src/runtime');
+  const loader = new Loader();
+  assert.equal(loader.source, '');
+});
+
+test('Loader.source with Qt.registerComponent loads synchronously', () => {
+  const { Item, Component, Loader, Qt } = require('../src/runtime');
+  const url = 'test://MyPage.qml';
+  const comp = new Component(({ parent }) => new Item({ parentItem: parent }));
+  Qt.registerComponent(url, comp);
+
+  const host = new Item();
+  const loader = new Loader({ parentItem: host, source: url });
+  assert.equal(loader.status,   Loader.Ready);
+  assert.ok(loader.item instanceof Item, 'item should be loaded from source URL');
+
+  // Cleanup registry
+  Qt._componentRegistry.delete(url);
+});
+
+test('Loader sets Error status when source is set but component not found', () => {
+  const { Loader } = require('../src/runtime');
+  const loader = new Loader({ source: 'nonexistent://Unknown.qml' });
+  assert.equal(loader.status, Loader.Error);
+});
+
+// ---------------------------------------------------------------------------
+// Step C: Timer
+// ---------------------------------------------------------------------------
+
+test('Timer has correct default properties', () => {
+  const { Timer } = require('../src/runtime');
+  const t = new Timer();
+  assert.equal(t.interval,         1000);
+  assert.equal(t.repeat,           false);
+  assert.equal(t.running,          false);
+  assert.equal(t.triggeredOnStart, false);
+});
+
+test('Timer emits triggered signal after interval', () => {
+  const { Timer, AnimationTicker } = require('../src/runtime');
+  const ticker = new AnimationTicker();
+  const t = new Timer({ interval: 100, repeat: false, ticker });
+
+  let count = 0;
+  t.triggered.connect(() => { count++; });
+
+  t.start();
+  ticker.advance(50);
+  assert.equal(count, 0, 'should not fire before interval');
+
+  ticker.advance(60);
+  assert.equal(count, 1, 'should fire once after interval');
+  assert.equal(t.running, false, 'non-repeat timer stops after firing');
+});
+
+test('Timer repeat fires multiple times', () => {
+  const { Timer, AnimationTicker } = require('../src/runtime');
+  const ticker = new AnimationTicker();
+  const t = new Timer({ interval: 100, repeat: true, ticker });
+
+  let count = 0;
+  t.triggered.connect(() => { count++; });
+
+  t.start();
+  ticker.advance(110);
+  assert.equal(count, 1);
+
+  ticker.advance(110);
+  assert.equal(count, 2);
+
+  t.stop();
+  assert.equal(t.running, false);
+});
+
+test('Timer triggeredOnStart fires immediately when started', () => {
+  const { Timer, AnimationTicker } = require('../src/runtime');
+  const ticker = new AnimationTicker();
+  const t = new Timer({ interval: 500, repeat: false, triggeredOnStart: true, ticker });
+
+  let count = 0;
+  t.triggered.connect(() => { count++; });
+
+  t.start();
+  assert.equal(count, 1, 'should fire once on start');
+});
+
+test('Timer onTriggered callback is called', () => {
+  const { Timer, AnimationTicker } = require('../src/runtime');
+  const ticker = new AnimationTicker();
+  const t = new Timer({ interval: 10, repeat: false, ticker });
+
+  let called = false;
+  t.onTriggered = () => { called = true; };
+
+  t.start();
+  ticker.advance(20);
+  assert.equal(called, true);
+});
+
+test('Timer restart resets elapsed time', () => {
+  const { Timer, AnimationTicker } = require('../src/runtime');
+  const ticker = new AnimationTicker();
+  const t = new Timer({ interval: 100, repeat: false, ticker });
+
+  let count = 0;
+  t.triggered.connect(() => { count++; });
+
+  t.start();
+  ticker.advance(80);
+  t.restart();        // reset elapsed to 0
+  ticker.advance(80); // only 80ms since restart – should not fire
+  assert.equal(count, 0, 'should not fire if restarted before interval');
+
+  ticker.advance(30); // now 110ms since restart – should fire
+  assert.equal(count, 1);
+});
+
+// ---------------------------------------------------------------------------
+// Step C: Connections
+// ---------------------------------------------------------------------------
+
+test('Connections target property defaults to null', () => {
+  const { Connections } = require('../src/runtime');
+  const conn = new Connections();
+  assert.equal(conn.target,  null);
+  assert.equal(conn.enabled, true);
+});
+
+test('Connections forwards signal from target', () => {
+  const { QObject, Connections } = require('../src/runtime');
+  const target = new QObject();
+  target.defineSignal('pinged');
+
+  const conn = new Connections({ target });
+  const received = [];
+  conn.connect('pinged', (val) => received.push(val));
+
+  target.pinged.emit('hello');
+  assert.deepEqual(received, ['hello']);
+});
+
+test('Connections reconnects when target changes', () => {
+  const { QObject, Connections } = require('../src/runtime');
+  const t1 = new QObject();
+  t1.defineSignal('fired');
+
+  const t2 = new QObject();
+  t2.defineSignal('fired');
+
+  const conn = new Connections({ target: t1 });
+  const received = [];
+  conn.connect('fired', (v) => received.push(v));
+
+  t1.fired.emit('from-t1');
+  assert.deepEqual(received, ['from-t1']);
+
+  conn.target = t2;
+  t1.fired.emit('from-t1-again'); // should not reach conn
+  t2.fired.emit('from-t2');
+  assert.deepEqual(received, ['from-t1', 'from-t2']);
+});
+
+test('Connections enabled=false stops forwarding', () => {
+  const { QObject, Connections } = require('../src/runtime');
+  const target = new QObject();
+  target.defineSignal('poke');
+
+  const conn = new Connections({ target });
+  const log = [];
+  conn.connect('poke', () => log.push('poke'));
+
+  target.poke.emit();
+  assert.deepEqual(log, ['poke']);
+
+  conn.enabled = false;
+  target.poke.emit();
+  assert.deepEqual(log, ['poke'], 'disabled – should not receive');
+
+  conn.enabled = true;
+  target.poke.emit();
+  assert.deepEqual(log, ['poke', 'poke'], 're-enabled – should receive again');
+});
+
+test('Connections destroy disconnects handlers', () => {
+  const { QObject, Connections } = require('../src/runtime');
+  const target = new QObject();
+  target.defineSignal('tick');
+
+  const conn = new Connections({ target });
+  const log = [];
+  conn.connect('tick', () => log.push('tick'));
+
+  target.tick.emit();
+  assert.deepEqual(log, ['tick']);
+
+  conn.destroy();
+  target.tick.emit();
+  assert.deepEqual(log, ['tick'], 'after destroy – no more events');
+});
+
+// ---------------------------------------------------------------------------
+// Step C: BindingElement
+// ---------------------------------------------------------------------------
+
+test('BindingElement applies value to target property when when=true', () => {
+  const { QObject, BindingElement } = require('../src/runtime');
+  const target = new QObject();
+  target.defineProperty('color', 'red');
+
+  const be = new BindingElement({ target, property: 'color', value: 'blue', when: true });
+  assert.equal(target.color, 'blue');
+  be.destroy();
+});
+
+test('BindingElement does not apply when when=false', () => {
+  const { QObject, BindingElement } = require('../src/runtime');
+  const target = new QObject();
+  target.defineProperty('x', 10);
+
+  const be = new BindingElement({ target, property: 'x', value: 99, when: false });
+  assert.equal(target.x, 10, 'value should not be applied when when=false');
+  be.destroy();
+});
+
+test('BindingElement activates when when changes to true', () => {
+  const { QObject, BindingElement } = require('../src/runtime');
+  const target = new QObject();
+  target.defineProperty('label', 'original');
+
+  const be = new BindingElement({ target, property: 'label', value: 'overridden', when: false });
+  assert.equal(target.label, 'original');
+
+  be.when = true;
+  assert.equal(target.label, 'overridden');
+  be.destroy();
+});
+
+test('BindingElement restores saved value when when changes back to false', () => {
+  const { QObject, BindingElement } = require('../src/runtime');
+  const target = new QObject();
+  target.defineProperty('opacity', 1);
+
+  const be = new BindingElement({ target, property: 'opacity', value: 0.5, when: true });
+  assert.equal(target.opacity, 0.5);
+
+  be.when = false;
+  assert.equal(target.opacity, 1, 'should restore saved value');
+  be.destroy();
+});
+
+test('BindingElement updates target when value changes while active', () => {
+  const { QObject, BindingElement } = require('../src/runtime');
+  const target = new QObject();
+  target.defineProperty('count', 0);
+
+  const be = new BindingElement({ target, property: 'count', value: 5, when: true });
+  assert.equal(target.count, 5);
+
+  be.value = 10;
+  assert.equal(target.count, 10);
+  be.destroy();
+});
