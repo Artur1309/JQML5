@@ -44,9 +44,9 @@ Item {
     }
 
     // States -----------------------------------------------------------------
-    // `pressed` state is listed first; `hovered` is listed second so that if
-    // both happen to be true simultaneously the `pressed` appearance wins
-    // (later entry in the list takes priority per Qt rules).
+    // `hovered` state is listed first; `pressed` is listed second so that
+    // when both conditions are true simultaneously the `pressed` appearance
+    // wins (later entry in the list takes priority per Qt rules).
     states: [
       State {
         name: "hovered"
