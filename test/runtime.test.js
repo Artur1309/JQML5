@@ -592,8 +592,152 @@ test('Transition runs NumberAnimation when state changes', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Stage A: Behavior
+// Stage A (Qt 6.x parity): when-driven states
 // ---------------------------------------------------------------------------
+
+test('when-state auto-activates when `when` is true on addState', () => {
+  const { Item, PropertyChanges, State, Binding } = require('../src/runtime');
+
+  const root = new Item();
+  root.defineProperty('color', '#ffffff');
+  root.defineProperty('pressed', false);
+
+  const pressedState = new State({ name: 'pressed' });
+  pressedState.addPropertyChanges(new PropertyChanges({ target: root, color: '#ff0000' }));
+
+  // Bind the state's `when` to root.pressed
+  pressedState.when = new Binding(() => root.pressed);
+  root.addState(pressedState);
+
+  // Initially pressed=false, state should remain ''
+  assert.equal(root.state, '');
+  assert.equal(root.color, '#ffffff');
+
+  // Set pressed=true → when-state should auto-activate
+  root.pressed = true;
+  assert.equal(root.state, 'pressed');
+  assert.equal(root.color, '#ff0000');
+
+  // Set pressed=false → state should revert to default ''
+  root.pressed = false;
+  assert.equal(root.state, '');
+  assert.equal(root.color, '#ffffff');
+});
+
+test('when-state does not activate when manual state is set', () => {
+  const { Item, PropertyChanges, State, Binding } = require('../src/runtime');
+
+  const root = new Item();
+  root.defineProperty('color', '#ffffff');
+  root.defineProperty('pressed', false);
+
+  const pressedState = new State({ name: 'pressed' });
+  pressedState.addPropertyChanges(new PropertyChanges({ target: root, color: '#ff0000' }));
+  pressedState.when = new Binding(() => root.pressed);
+
+  const activeState = new State({ name: 'active' });
+  activeState.addPropertyChanges(new PropertyChanges({ target: root, color: '#0000ff' }));
+  root.addState(pressedState);
+  root.addState(activeState);
+
+  // Manually set a state
+  root.state = 'active';
+  assert.equal(root.color, '#0000ff');
+
+  // Even if pressed becomes true, manual state should not be overridden
+  root.pressed = true;
+  assert.equal(root.state, 'active');
+  assert.equal(root.color, '#0000ff');
+});
+
+test('when-state auto-activates after manual state is cleared to empty', () => {
+  const { Item, PropertyChanges, State, Binding } = require('../src/runtime');
+
+  const root = new Item();
+  root.defineProperty('color', '#ffffff');
+  root.defineProperty('pressed', true); // pressed starts true
+
+  const pressedState = new State({ name: 'pressed' });
+  pressedState.addPropertyChanges(new PropertyChanges({ target: root, color: '#ff0000' }));
+  pressedState.when = new Binding(() => root.pressed);
+  root.addState(pressedState);
+
+  // when=true so state should auto-activate immediately
+  assert.equal(root.state, 'pressed');
+
+  // Manually override to a different state
+  root.state = 'pressed'; // still pressed – simulate resetting to same value
+  assert.equal(root.state, 'pressed');
+
+  // Clear manual state to '' – the when condition is still true so it should re-activate
+  root.pressed = false; // first deactivate
+  assert.equal(root.state, '');
+
+  root.pressed = true; // re-activate via when
+  assert.equal(root.state, 'pressed');
+  assert.equal(root.color, '#ff0000');
+});
+
+test('later when-state in list wins when multiple when conditions are true', () => {
+  const { Item, PropertyChanges, State, Binding } = require('../src/runtime');
+
+  const root = new Item();
+  root.defineProperty('color', '#ffffff');
+  root.defineProperty('flag', true);
+
+  const stateA = new State({ name: 'stateA' });
+  stateA.addPropertyChanges(new PropertyChanges({ target: root, color: '#aaaaaa' }));
+  stateA.when = new Binding(() => root.flag);
+
+  const stateB = new State({ name: 'stateB' });
+  stateB.addPropertyChanges(new PropertyChanges({ target: root, color: '#bbbbbb' }));
+  stateB.when = new Binding(() => root.flag);
+
+  // Add stateA first, stateB second – stateB (later in list) should win
+  root.addState(stateA);
+  root.addState(stateB);
+
+  assert.equal(root.state, 'stateB', 'later when-state should win');
+  assert.equal(root.color, '#bbbbbb');
+});
+
+test('Transition animation takes precedence over Behavior on same property', () => {
+  const {
+    Item, PropertyChanges, State, Transition, Behavior,
+    NumberAnimation, AnimationTicker,
+  } = require('../src/runtime');
+
+  const ticker = new AnimationTicker();
+  const item = new Item();
+
+  // Attach a Behavior on x
+  const behaviorAnim = new NumberAnimation({ ticker, duration: 500, easing: 'Linear' });
+  const behavior = new Behavior({ animation: behaviorAnim });
+  item.addBehavior('x', behavior);
+
+  // Define a state that changes x
+  const rightState = new State({ name: 'right' });
+  rightState.addPropertyChanges(new PropertyChanges({ target: item, x: 200 }));
+  item.addState(rightState);
+
+  // Define a Transition for this state change
+  const transAnim = new NumberAnimation({ ticker, duration: 100, easing: 'Linear' });
+  const transition = new Transition({ from: '*', to: 'right', animations: [transAnim] });
+  item.addTransition(transition);
+
+  item.state = 'right';
+
+  // Transition should be running, Behavior should NOT have been triggered
+  assert.equal(item._activeStateAnimations.length, 1, 'transition animation should be active');
+  assert.equal(behavior._animating, false, 'Behavior should not be animating (Transition takes precedence)');
+  assert.ok(item.x < 200, `x should be animating via Transition, got ${item.x}`);
+
+  // After full duration the Transition should have landed on the final value
+  ticker.advance(100);
+  assert.equal(item.x, 200, 'x should reach final value after Transition completes');
+});
+
+
 
 test('Behavior intercepts plain-value assignment and animates to target', () => {
   const { Item, Behavior, NumberAnimation, AnimationTicker } = require('../src/runtime');
