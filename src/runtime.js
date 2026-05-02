@@ -2146,10 +2146,12 @@ class Animation extends QObject {
     this._elapsed = 0;
     this._loopsDone = 0;
     this._started = false;
+    this._stopRequested = false;
 
     this.defineProperty('running', false);
     this.defineProperty('loops', options.loops ?? 1);
     this.defineProperty('duration', options.duration ?? 250);
+    this.defineProperty('alwaysRunToEnd', options.alwaysRunToEnd ?? false);
     this.defineSignal('started');
     this.defineSignal('stopped');
     this.defineSignal('finished');
@@ -2167,6 +2169,7 @@ class Animation extends QObject {
     if (this._started) return;
     this._elapsed = 0;
     this._loopsDone = 0;
+    this._stopRequested = false;
     this._started = true;
     this._onStart();
     this._setRunning(true);
@@ -2174,12 +2177,30 @@ class Animation extends QObject {
     this.started.emit();
   }
 
+  /** Stop the animation. If alwaysRunToEnd is true, waits until the current
+   *  loop iteration completes before stopping (best-effort, like Qt). */
   stop() {
     if (!this._started) return;
+    if (this.alwaysRunToEnd) {
+      this._stopRequested = true;
+      return;
+    }
+    this._stopRequested = false;
     this._started = false;
     this._ticker.remove(this);
     this._setRunning(false);
     this.stopped.emit();
+  }
+
+  /** Restart the animation from the beginning regardless of alwaysRunToEnd. */
+  restart() {
+    if (this._started) {
+      this._stopRequested = false;
+      this._started = false;
+      this._ticker.remove(this);
+      this._setRunning(false);
+    }
+    this.start();
   }
 
   _onStart() {}
@@ -2196,12 +2217,19 @@ class Animation extends QObject {
     if (this._elapsed >= dur) {
       this._loopsDone += 1;
       const loops = this.loops;
-      if (loops !== -1 && this._loopsDone >= loops) {
+      const naturallyDone = loops !== -1 && this._loopsDone >= loops;
+
+      if (naturallyDone || this._stopRequested) {
         this._applyProgress(1);
+        this._stopRequested = false;
         this._started = false;
         this._ticker.remove(this);
         this._setRunning(false);
-        this.finished.emit();
+        if (naturallyDone) {
+          this.finished.emit();
+        } else {
+          this.stopped.emit();
+        }
       } else {
         this._elapsed -= dur;
         this._applyProgress(0);
@@ -2212,6 +2240,7 @@ class Animation extends QObject {
   _applyProgress(_progress) {}
 
   destroy() {
+    this._stopRequested = false;
     this.stop();
     super.destroy();
   }
@@ -2258,6 +2287,65 @@ class NumberAnimation extends Animation {
     const fromV = this._fromValue ?? 0;
     const toV = this.to;
     target[prop] = fromV + (toV - fromV) * t;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// PropertyAnimation – animates one or more numeric properties
+// ---------------------------------------------------------------------------
+
+class PropertyAnimation extends Animation {
+  constructor(options = {}) {
+    super(options);
+
+    this._fromValues = {};
+
+    this.defineProperty('target', options.target ?? null);
+    this.defineProperty('property', options.property ?? '');
+    // Comma-separated string or array of property names (Qt-style `properties`)
+    this.defineProperty('properties', options.properties ?? '');
+    this.defineProperty('from', options.from ?? null);
+    this.defineProperty('to', options.to ?? 0);
+    this.defineProperty('easing', options.easing ?? 'Linear');
+  }
+
+  /** Returns an array of property names this animation targets. */
+  _resolvedProperties() {
+    const single = this.property;
+    if (single) return [single];
+    const multi = this.properties;
+    if (typeof multi === 'string' && multi.trim()) {
+      return multi.split(',').map((s) => s.trim()).filter(Boolean);
+    }
+    if (Array.isArray(multi)) return multi.filter((s) => typeof s === 'string' && s);
+    return [];
+  }
+
+  _onStart() {
+    const capturedFrom = this.from;
+    const props = this._resolvedProperties();
+    this._fromValues = {};
+    for (const prop of props) {
+      if (capturedFrom !== null && capturedFrom !== undefined) {
+        this._fromValues[prop] = capturedFrom;
+      } else if (this.target) {
+        this._fromValues[prop] = this.target[prop] ?? 0;
+      } else {
+        this._fromValues[prop] = 0;
+      }
+    }
+  }
+
+  _applyProgress(progress) {
+    const target = this.target;
+    if (!target) return;
+    const easingFn = _resolveEasing(this.easing);
+    const t = easingFn(progress);
+    const toV = this.to;
+    for (const prop of this._resolvedProperties()) {
+      const fromV = this._fromValues[prop] !== undefined ? this._fromValues[prop] : 0;
+      target[prop] = fromV + (toV - fromV) * t;
+    }
   }
 }
 
@@ -2620,6 +2708,10 @@ class Behavior extends QObject {
         anim.to = typeof toValue === 'number' ? toValue : 0;
         def.readOnly = prevRO;
       }
+    } else if (anim instanceof PropertyAnimation) {
+      // to value is set; _fromValues will be captured in _onStart() by reading
+      // the target property (which still holds the old/current value at this point).
+      anim.to = typeof toValue === 'number' ? toValue : 0;
     } else if (anim instanceof ColorAnimation) {
       anim._fromParsed = _parseColor(typeof fromValue === 'string' ? fromValue : '#000000');
       anim._toParsed = _parseColor(typeof toValue === 'string' ? toValue : '#000000');
@@ -2672,6 +2764,17 @@ function _cloneAnimationForProperty(templateAnim, target, propName, fromValue, t
       loops: templateAnim.loops,
     });
     clone._fromValue = fromValue;
+  } else if (templateAnim instanceof PropertyAnimation) {
+    clone = new PropertyAnimation({
+      ticker,
+      target,
+      property: propName,
+      from: fromValue,
+      to: toValue,
+      duration: templateAnim.duration,
+      easing: templateAnim.easing,
+      loops: templateAnim.loops,
+    });
   } else if (templateAnim instanceof ColorAnimation) {
     clone = new ColorAnimation({
       ticker,
@@ -10166,6 +10269,7 @@ const runtimeExports = {
   AnimationTicker,
   Animation,
   NumberAnimation,
+  PropertyAnimation,
   ColorAnimation,
   SequentialAnimation,
   ParallelAnimation,
