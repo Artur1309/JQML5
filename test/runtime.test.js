@@ -7555,7 +7555,7 @@ test('Tab traversal skips invisible items', () => {
   assert.equal(scene.activeFocusItem, c, 'Tab should skip invisible item b and land on c');
 });
 
-test('Tab traversal skips items with activeFocusOnTab=false and focusable=false', () => {
+test('Tab traversal skips items with activeFocusOnTab=false', () => {
   const { Item, Scene } = require('../src/runtime');
 
   const root = new Item();
