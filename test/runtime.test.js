@@ -642,8 +642,221 @@ test('Behavior does not intercept binding assignments', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Stage B: ListModel
+// Stage A: PropertyAnimation
 // ---------------------------------------------------------------------------
+
+test('PropertyAnimation animates a single property (property field)', () => {
+  const { AnimationTicker, PropertyAnimation, QObject } = require('../src/runtime');
+
+  const ticker = new AnimationTicker();
+  const target = new QObject();
+  target.defineProperty('x', 0);
+
+  const anim = new PropertyAnimation({ ticker, target, property: 'x', from: 0, to: 100, duration: 200, easing: 'Linear' });
+  anim.start();
+
+  ticker.advance(100);
+  assert.equal(target.x, 50);
+
+  ticker.advance(100);
+  assert.equal(target.x, 100);
+  assert.equal(anim.running, false);
+});
+
+test('PropertyAnimation animates multiple properties via properties field', () => {
+  const { AnimationTicker, PropertyAnimation, QObject } = require('../src/runtime');
+
+  const ticker = new AnimationTicker();
+  const target = new QObject();
+  target.defineProperty('x', 0);
+  target.defineProperty('y', 0);
+
+  const anim = new PropertyAnimation({
+    ticker,
+    target,
+    properties: 'x, y',
+    from: 0,
+    to: 80,
+    duration: 200,
+    easing: 'Linear',
+  });
+  anim.start();
+
+  ticker.advance(100);
+  assert.equal(target.x, 40);
+  assert.equal(target.y, 40);
+
+  ticker.advance(100);
+  assert.equal(target.x, 80);
+  assert.equal(target.y, 80);
+  assert.equal(anim.running, false);
+});
+
+test('PropertyAnimation reaches exact to value at completion (deterministic)', () => {
+  const { AnimationTicker, PropertyAnimation, QObject } = require('../src/runtime');
+
+  const ticker = new AnimationTicker();
+  const target = new QObject();
+  target.defineProperty('val', 5);
+
+  const anim = new PropertyAnimation({ ticker, target, property: 'val', from: 5, to: 99, duration: 300, easing: 'InOutQuad' });
+  anim.start();
+  ticker.advance(300);
+
+  assert.equal(target.val, 99);
+  assert.equal(anim.running, false);
+});
+
+test('PropertyAnimation easing InQuad midpoint is less than Linear midpoint', () => {
+  const { AnimationTicker, PropertyAnimation, QObject } = require('../src/runtime');
+
+  const ticker1 = new AnimationTicker();
+  const t1 = new QObject();
+  t1.defineProperty('v', 0);
+  const linear = new PropertyAnimation({ ticker: ticker1, target: t1, property: 'v', from: 0, to: 100, duration: 200, easing: 'Linear' });
+  linear.start();
+  ticker1.advance(100);
+  const linearMid = t1.v;
+
+  const ticker2 = new AnimationTicker();
+  const t2 = new QObject();
+  t2.defineProperty('v', 0);
+  const inQuad = new PropertyAnimation({ ticker: ticker2, target: t2, property: 'v', from: 0, to: 100, duration: 200, easing: 'InQuad' });
+  inQuad.start();
+  ticker2.advance(100);
+  const inQuadMid = t2.v;
+
+  assert.equal(linearMid, 50);
+  assert.ok(inQuadMid < linearMid, `InQuad midpoint (${inQuadMid}) should be less than Linear midpoint (${linearMid})`);
+});
+
+test('Behavior with PropertyAnimation animates property changes', () => {
+  const { Item, Behavior, PropertyAnimation, AnimationTicker } = require('../src/runtime');
+
+  const ticker = new AnimationTicker();
+  const item = new Item();
+
+  const anim = new PropertyAnimation({ ticker, duration: 100, easing: 'Linear' });
+  const behavior = new Behavior({ animation: anim });
+  item.addBehavior('x', behavior);
+
+  item.x = 200;
+
+  assert.ok(item.x < 200, `x should be animating, got ${item.x}`);
+
+  ticker.advance(50);
+  assert.ok(item.x >= 100 && item.x < 200, `x should be ~100, got ${item.x}`);
+
+  ticker.advance(50);
+  assert.equal(item.x, 200);
+});
+
+// ---------------------------------------------------------------------------
+// Stage A: Animation.restart() and alwaysRunToEnd
+// ---------------------------------------------------------------------------
+
+test('Animation restart() resets and restarts the animation from zero', () => {
+  const { AnimationTicker, NumberAnimation, QObject } = require('../src/runtime');
+
+  const ticker = new AnimationTicker();
+  const target = new QObject();
+  target.defineProperty('v', 0);
+
+  const anim = new NumberAnimation({ ticker, target, property: 'v', from: 0, to: 100, duration: 200 });
+  anim.start();
+  ticker.advance(100); // halfway
+
+  const midV = target.v;
+  assert.ok(midV > 0 && midV < 100, `Expected mid value, got ${midV}`);
+
+  anim.restart(); // should start fresh
+  assert.equal(anim.running, true);
+
+  // After restart, value should animate from captured from (target's current value) to 100
+  ticker.advance(200);
+  assert.equal(target.v, 100);
+  assert.equal(anim.running, false);
+});
+
+test('Animation alwaysRunToEnd=true: stop() defers until loop iteration completes', () => {
+  const { AnimationTicker, NumberAnimation, QObject } = require('../src/runtime');
+
+  const ticker = new AnimationTicker();
+  const target = new QObject();
+  target.defineProperty('v', 0);
+
+  const anim = new NumberAnimation({
+    ticker,
+    target,
+    property: 'v',
+    from: 0,
+    to: 100,
+    duration: 200,
+    alwaysRunToEnd: true,
+    loops: 3,
+  });
+
+  let stoppedFired = false;
+  let finishedFired = false;
+  anim.stopped.connect(() => { stoppedFired = true; });
+  anim.finished.connect(() => { finishedFired = true; });
+
+  anim.start();
+  ticker.advance(100); // halfway through loop 1
+  assert.equal(anim.running, true);
+
+  anim.stop(); // should not stop immediately
+  assert.equal(anim.running, true, 'alwaysRunToEnd: should still be running after stop()');
+  assert.equal(stoppedFired, false);
+
+  ticker.advance(100); // complete loop 1 → now stops
+  assert.equal(anim.running, false);
+  assert.equal(stoppedFired, true);
+  assert.equal(finishedFired, false);
+  assert.equal(target.v, 100);
+});
+
+test('Animation alwaysRunToEnd=false: stop() halts immediately', () => {
+  const { AnimationTicker, NumberAnimation, QObject } = require('../src/runtime');
+
+  const ticker = new AnimationTicker();
+  const target = new QObject();
+  target.defineProperty('v', 0);
+
+  const anim = new NumberAnimation({ ticker, target, property: 'v', from: 0, to: 100, duration: 200 });
+  anim.start();
+  ticker.advance(50);
+
+  const before = target.v;
+  anim.stop();
+  assert.equal(anim.running, false);
+
+  ticker.advance(200);
+  assert.equal(target.v, before); // no more change
+});
+
+test('Multiple animations on the same property: last started wins', () => {
+  const { AnimationTicker, NumberAnimation, QObject } = require('../src/runtime');
+
+  const ticker = new AnimationTicker();
+  const target = new QObject();
+  target.defineProperty('x', 0);
+
+  const anim1 = new NumberAnimation({ ticker, target, property: 'x', from: 0, to: 100, duration: 200 });
+  const anim2 = new NumberAnimation({ ticker, target, property: 'x', from: 0, to: 50, duration: 100 });
+
+  anim1.start();
+  ticker.advance(50); // anim1 partway
+
+  anim2.start(); // starts second animation on same property
+  ticker.advance(100); // anim2 completes first
+
+  assert.equal(target.x, 50); // anim2's to value wins (it completed)
+  assert.equal(anim2.running, false);
+  // anim1 is still running and will continue
+  assert.equal(anim1.running, true);
+});
+
 
 test('ListModel append adds rows and emits countChanged and rowsInserted', () => {
   const { ListModel } = require('../src/runtime');
