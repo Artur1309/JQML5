@@ -7466,3 +7466,193 @@ test('Stage F: Binding coalescing: reactive bindings stay consistent after multi
   obj.counter = 7;
   assert.equal(obj.doubled, 14, 'binding should stay reactive after multiple updates');
 });
+
+
+// ---------------------------------------------------------------------------
+// Stage G: Focus / Input parity tests
+// ---------------------------------------------------------------------------
+
+test('TextInput without explicit height has a sensible non-zero implicitHeight', () => {
+  const { TextInput } = require('../src/runtime');
+
+  const ti = new TextInput({ blinkInterval: 0 });
+  // Default font.pixelSize is 14; expected implicitHeight = max(20, 14+8) = 22
+  assert.ok(ti.implicitHeight > 0, 'implicitHeight must be > 0 when no explicit height is set');
+  assert.equal(ti.implicitHeight, 22, 'default implicitHeight should be font.pixelSize(14) + 8 = 22');
+});
+
+test('TextInput implicitHeight updates when font.pixelSize changes', () => {
+  const { TextInput } = require('../src/runtime');
+
+  const ti = new TextInput({ font: { family: 'sans-serif', pixelSize: 14, bold: false }, blinkInterval: 0 });
+  assert.equal(ti.implicitHeight, 22, 'initial: pixelSize=14 → implicitHeight=22');
+
+  // Change font to a larger size
+  ti.font = { family: 'sans-serif', pixelSize: 24, bold: false };
+  assert.equal(ti.implicitHeight, 32, 'after pixelSize=24 → implicitHeight=32');
+
+  // Change font to a small size — minimum clamp applies
+  ti.font = { family: 'sans-serif', pixelSize: 8, bold: false };
+  assert.equal(ti.implicitHeight, 20, 'minimum clamp: pixelSize=8 → implicitHeight=20');
+});
+
+test('TextInput implicitHeight with large font stays proportional', () => {
+  const { TextInput } = require('../src/runtime');
+
+  const ti = new TextInput({ font: { family: 'sans-serif', pixelSize: 32, bold: false }, blinkInterval: 0 });
+  assert.equal(ti.implicitHeight, 40, 'pixelSize=32 → implicitHeight=40');
+});
+
+test('Tab traversal skips disabled items', () => {
+  const { Item, Scene } = require('../src/runtime');
+
+  const root = new Item();
+  root.width = 400; root.height = 400;
+
+  const a = new Item({ parentItem: root });
+  a.activeFocusOnTab = true; a.focusable = true;
+  a.width = 100; a.height = 30;
+
+  const b = new Item({ parentItem: root });
+  b.activeFocusOnTab = true; b.focusable = true;
+  b.enabled = false; // disabled – should be skipped
+  b.width = 100; b.height = 30;
+
+  const c = new Item({ parentItem: root });
+  c.activeFocusOnTab = true; c.focusable = true;
+  c.width = 100; c.height = 30;
+
+  const scene = new Scene({ rootItem: root });
+  scene.forceActiveFocus(a);
+
+  scene.focusNext();
+  assert.equal(scene.activeFocusItem, c, 'Tab should skip disabled item b and land on c');
+});
+
+test('Tab traversal skips invisible items', () => {
+  const { Item, Scene } = require('../src/runtime');
+
+  const root = new Item();
+  root.width = 400; root.height = 400;
+
+  const a = new Item({ parentItem: root });
+  a.activeFocusOnTab = true; a.focusable = true;
+  a.width = 100; a.height = 30;
+
+  const b = new Item({ parentItem: root });
+  b.activeFocusOnTab = true; b.focusable = true;
+  b.visible = false; // invisible – should be skipped
+  b.width = 100; b.height = 30;
+
+  const c = new Item({ parentItem: root });
+  c.activeFocusOnTab = true; c.focusable = true;
+  c.width = 100; c.height = 30;
+
+  const scene = new Scene({ rootItem: root });
+  scene.forceActiveFocus(a);
+
+  scene.focusNext();
+  assert.equal(scene.activeFocusItem, c, 'Tab should skip invisible item b and land on c');
+});
+
+test('Tab traversal skips items with activeFocusOnTab=false', () => {
+  const { Item, Scene } = require('../src/runtime');
+
+  const root = new Item();
+  root.width = 400; root.height = 400;
+
+  const a = new Item({ parentItem: root });
+  a.activeFocusOnTab = true; a.focusable = true;
+  a.width = 100; a.height = 30;
+
+  const b = new Item({ parentItem: root });
+  b.activeFocusOnTab = false; b.focusable = false; // not in tab chain
+  b.width = 100; b.height = 30;
+
+  const c = new Item({ parentItem: root });
+  c.activeFocusOnTab = true; c.focusable = true;
+  c.width = 100; c.height = 30;
+
+  const scene = new Scene({ rootItem: root });
+  scene.forceActiveFocus(a);
+
+  scene.focusNext();
+  assert.equal(scene.activeFocusItem, c, 'Tab should skip b (not focusable by tab) and land on c');
+});
+
+test('Wheel propagation: inner Flickable at boundary lets outer Flickable scroll', () => {
+  const { Flickable } = require('../src/runtime');
+
+  // Outer Flickable: 200x200 viewport, 200x600 content
+  const outer = new Flickable();
+  outer.width = 200; outer.height = 200;
+  outer.contentWidth = 200; outer.contentHeight = 600;
+  outer.contentY = 0;
+
+  // Inner Flickable: 200x200 viewport, 200x400 content, already scrolled to bottom
+  const inner = new Flickable();
+  inner.width = 200; inner.height = 200;
+  inner.contentWidth = 200; inner.contentHeight = 400;
+  inner.contentY = 200; // at the bottom (max = contentHeight - height = 400 - 200 = 200)
+
+  // Scroll down 50px on inner: it's at the boundary, should return false
+  const innerAccepted = inner.handleWheelEvent({ deltaX: 0, deltaY: 50, deltaMode: 0 });
+  assert.equal(innerAccepted, false, 'Inner Flickable at boundary must not accept the wheel event');
+
+  // Outer Flickable should still be able to scroll
+  const outerAccepted = outer.handleWheelEvent({ deltaX: 0, deltaY: 50, deltaMode: 0 });
+  assert.equal(outerAccepted, true, 'Outer Flickable should accept wheel event');
+  assert.equal(outer.contentY, 50, 'Outer Flickable should have scrolled');
+});
+
+test('Wheel propagation: inner Flickable with room scrolls and does not propagate', () => {
+  const { Flickable } = require('../src/runtime');
+
+  const outer = new Flickable();
+  outer.width = 200; outer.height = 200;
+  outer.contentWidth = 200; outer.contentHeight = 600;
+  outer.contentY = 0;
+
+  const inner = new Flickable();
+  inner.width = 200; inner.height = 200;
+  inner.contentWidth = 200; inner.contentHeight = 400;
+  inner.contentY = 0; // at the top, has room to scroll
+
+  // Scroll down 50px on inner: it has room, should accept
+  const innerAccepted = inner.handleWheelEvent({ deltaX: 0, deltaY: 50, deltaMode: 0 });
+  assert.equal(innerAccepted, true, 'Inner Flickable with room should accept wheel event');
+  assert.equal(inner.contentY, 50, 'Inner Flickable should have scrolled');
+
+  // Outer Flickable should not have scrolled (event was handled by inner)
+  assert.equal(outer.contentY, 0, 'Outer Flickable should NOT have scrolled');
+});
+
+test('WheelHandler accepting event stops outer Flickable from scrolling', () => {
+  const { Item, Flickable, WheelHandler, Scene } = require('../src/runtime');
+
+  const root = new Item();
+  root.width = 400; root.height = 400;
+
+  // Outer Flickable
+  const flick = new Flickable({ parentItem: root });
+  flick.width = 400; flick.height = 400;
+  flick.contentWidth = 400; flick.contentHeight = 1200;
+  flick.contentY = 0;
+
+  // WheelHandler inside Flickable that accepts all vertical wheel events
+  let handlerFired = false;
+  const wh = new WheelHandler({ parentItem: flick });
+  // No explicit bounds so it uses parent bounds (the Flickable)
+  wh.wheel.connect((event) => {
+    handlerFired = true;
+    event.accepted = true;
+  });
+
+  const scene = new Scene({ rootItem: root });
+
+  // Dispatch a wheel event in the center of the Flickable
+  scene.dispatchWheel(200, 200, { deltaX: 0, deltaY: 60, deltaMode: 0 });
+
+  assert.equal(handlerFired, true, 'WheelHandler should have fired');
+  assert.equal(flick.contentY, 0, 'Flickable should NOT scroll when WheelHandler accepted the event');
+});

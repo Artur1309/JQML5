@@ -4724,14 +4724,22 @@ class Flickable extends Item {
 
     this._stopFlick();
 
+    // Track whether content actually moved to support nested Flickable propagation:
+    // if the inner Flickable is at its boundary, it returns false so the outer
+    // Flickable (or other parent handler) can consume the event instead.
+    let scrolled = false;
     if (this._canFlickH() && dx !== 0) {
-      this.contentX = this._clampX((this.contentX || 0) + dx);
+      const prevX = this.contentX || 0;
+      this.contentX = this._clampX(prevX + dx);
+      if (this.contentX !== prevX) scrolled = true;
     }
     if (this._canFlickV() && dy !== 0) {
-      this.contentY = this._clampY((this.contentY || 0) + dy);
+      const prevY = this.contentY || 0;
+      this.contentY = this._clampY(prevY + dy);
+      if (this.contentY !== prevY) scrolled = true;
     }
 
-    return (this._canFlickH() && dx !== 0) || (this._canFlickV() && dy !== 0);
+    return scrolled;
   }
 
   // -----------------------------------------------------------------------
@@ -6621,7 +6629,13 @@ class TextInput extends Item {
     this.focusable = true;
     this.clip = options.clip !== undefined ? options.clip : true;
     this.implicitWidth = 120;
-    this.implicitHeight = 28;
+    // Qt-like default: font.pixelSize + top/bottom padding (4px each), minimum 20px.
+    this.implicitHeight = TextInput._calcImplicitHeight(this.font);
+
+    // Update implicitHeight whenever the font property changes.
+    this.connect('fontChanged', (newFont) => {
+      this.implicitHeight = TextInput._calcImplicitHeight(newFont);
+    });
 
     // Internal state
     this._cursorBlinkTimer = null;
@@ -6650,6 +6664,12 @@ class TextInput extends Item {
     if (initText.length > 0) {
       this._setCursorPos(initText.length, false);
     }
+  }
+
+  /** Qt-like implicitHeight: pixelSize + 8px vertical padding, minimum 20px. */
+  static _calcImplicitHeight(font) {
+    const pixelSize = (font && font.pixelSize) ? font.pixelSize : 14;
+    return Math.max(20, pixelSize + 8);
   }
 
   _fontString() {
