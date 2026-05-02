@@ -804,6 +804,12 @@ class Item extends QtObject {
     this._behaviors = new Map();
     this._baseValues = new Map();
     this._activeStateAnimations = [];
+    // when-driven state tracking
+    this._whenDriven = false;
+    this._settingWhenState = false;
+    this._whenDisconnectors = [];
+    // Set of property names currently animated by a state Transition (bypasses Behavior)
+    this._stateAnimatingProps = new Set();
 
     this.defineProperty('x', 0);
     this.defineProperty('y', 0);
@@ -839,7 +845,16 @@ class Item extends QtObject {
 
     this.defineProperty('state', '', {
       onChanged: (nextState, previousState) => {
+        if (!this._settingWhenState) {
+          // Manual assignment: disable when-driven tracking
+          this._whenDriven = false;
+        }
         this._applyState(nextState, previousState);
+        // When the item returns to the default state manually, re-evaluate
+        // when conditions so a matching when-state can auto-activate.
+        if (!this._settingWhenState && nextState === '') {
+          this._reevaluateWhenStates();
+        }
       },
     });
 
@@ -889,6 +904,45 @@ class Item extends QtObject {
   addState(stateObj) {
     if (stateObj instanceof State) {
       this._states.push(stateObj);
+      // Watch this state's `when` property so we can auto-activate it
+      const disconnect = stateObj.connect('whenChanged', () => {
+        this._reevaluateWhenStates();
+      });
+      this._whenDisconnectors.push(disconnect);
+      // Immediately check if this new state's when condition is already true
+      this._reevaluateWhenStates();
+    }
+  }
+
+  // Compute the effective when-driven state (last state in list with `when`
+  // evaluating to truthy wins, matching Qt priority rules) and activate it
+  // if the item is currently in the default or a when-driven state.
+  _reevaluateWhenStates() {
+    if (this._destroying) return;
+
+    // Only auto-activate when-states if the item is in the default state
+    // or if the current state was itself set by the when mechanism.
+    if (this.state !== '' && !this._whenDriven) {
+      return; // A manual state is active – do not override it.
+    }
+
+    // Find the last state in the list whose `when` evaluates to truthy.
+    // Later entries in the list win, which matches Qt's documented behaviour.
+    let targetStateName = '';
+    for (const s of this._states) {
+      if (s.when) {
+        targetStateName = s.name;
+      }
+    }
+
+    if (targetStateName === this.state) return; // Nothing to change.
+
+    this._settingWhenState = true;
+    this._whenDriven = targetStateName !== '';
+    try {
+      this.state = targetStateName;
+    } finally {
+      this._settingWhenState = false;
     }
   }
 
@@ -971,6 +1025,21 @@ class Item extends QtObject {
 
         if (anim) {
           const animClone = _cloneAnimationForProperty(anim, target, propName, fromValue, toValue);
+
+          // Transition animations take precedence over Behavior on the same property
+          // (Qt precedence rule). Mark the property as state-animating so that
+          // _assignProperty skips the Behavior while this animation runs.
+          if (target._stateAnimatingProps) {
+            target._stateAnimatingProps.add(propName);
+            const onDone = () => {
+              animClone.finished.disconnect(onDone);
+              animClone.stopped.disconnect(onDone);
+              target._stateAnimatingProps.delete(propName);
+            };
+            animClone.finished.connect(onDone);
+            animClone.stopped.connect(onDone);
+          }
+
           animClone.start();
           this._activeStateAnimations.push(animClone);
         } else {
@@ -1013,7 +1082,7 @@ class Item extends QtObject {
       // `Behavior` may be defined later in the file but method bodies are evaluated lazily
       // eslint-disable-next-line no-use-before-define
       const behavior = this._behaviors.get(name);
-      if (behavior && !behavior._animating) {
+      if (behavior && !behavior._animating && !this._stateAnimatingProps.has(name)) {
         const currentValue = this._propertyValues.get(name);
         if (!Object.is(currentValue, rawValue)) {
           behavior._startAnimation(this, name, currentValue, rawValue);
@@ -1033,6 +1102,11 @@ class Item extends QtObject {
       anim.stop();
     }
     this._activeStateAnimations = [];
+    for (const disconnect of this._whenDisconnectors) {
+      try { disconnect(); } catch (_) { /* ignore */ }
+    }
+    this._whenDisconnectors = [];
+    this._stateAnimatingProps.clear();
     super.destroy();
   }
 
@@ -2615,8 +2689,12 @@ class State extends QObject {
   constructor(options = {}) {
     super();
     this.name = options.name ?? '';
-    this.when = options.when ?? null;
     this._propertyChanges = [];
+
+    // Make `when` a reactive property so the owning Item can watch whenChanged
+    // and auto-activate this state when the condition becomes true.
+    // A value of null/undefined means the state is never auto-activated.
+    this.defineProperty('when', options.when !== undefined ? options.when : null);
 
     if (Array.isArray(options.changes)) {
       for (const pc of options.changes) {
