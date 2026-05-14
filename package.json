@@ -9,10 +9,16 @@
   },
   "scripts": {
     "test": "node --test",
+    "test:cross-runtime": "node ./scripts/cross-runtime/cross-runtime-runner.js",
     "build:example": "node ./tools/jqmlc/index.js ./examples/qml-app/Main.qml --outdir dist",
     "dev:example": "node ./tools/jqmlc/dev-example.js"
   },
   "dependencies": {
     "esbuild": "^0.25.11"
+  },
+  "devDependencies": {
+    "pixelmatch": "^7.2.0",
+    "playwright": "^1.60.0",
+    "pngjs": "^7.0.0"
   }
 }

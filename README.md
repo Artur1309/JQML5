@@ -539,3 +539,34 @@ npm run dev:example
 npm test
 ```
 
+### Cross-runtime desktop + browser parity test
+
+This repository now includes a parity test system that runs one shared QML scenario in:
+
+- **Qt SDK desktop runtime** (via `qmltestrunner`, offscreen)
+- **Web runtime** (compiled by `jqmlc` and executed in Playwright Chromium)
+
+It simulates the same mouse and keyboard sequence in both environments, then compares:
+
+- `[CROSS]` log trace entries (must match exactly)
+- screenshots (`qt.png` vs `web.png`) using pixel diff ratio threshold
+
+Run:
+
+```bash
+npm run test:cross-runtime
+```
+
+Options:
+
+- `--qt-bin <path>`: path to `qmltestrunner`
+- `--keys <sequence>`: keyboard sequence (default: `AB`)
+- `--max-diff-ratio <0..1>`: allowed visual mismatch ratio (default: `0.02`)
+- `--keep-artifacts`: keep generated artifacts directory even on success
+
+Examples:
+
+```bash
+npm run test:cross-runtime -- --qt-bin /opt/Qt/6.8.0/gcc_64/bin/qmltestrunner --keep-artifacts
+npm run test:cross-runtime -- --keys AB --max-diff-ratio 0.01
+```
